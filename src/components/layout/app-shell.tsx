@@ -4,17 +4,14 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
-  Activity, Bell, Box, ChevronRight, CircleUserRound, CloudCog, Database,
+  Activity, Bell, ChevronRight, CircleUserRound, CloudCog, Database,
   FileKey2, FolderKanban, KeyRound, LayoutDashboard, Menu, Moon, Search,
-  Settings, Sun, UploadCloud, UsersRound, X,
+  Settings, Sun, UsersRound, X,
 } from "lucide-react";
 
 const nav = [
   { href: "/dashboard", label: "Visão geral", icon: LayoutDashboard },
   { href: "/projects", label: "Projetos", icon: FolderKanban },
-  { href: "/datasets", label: "Datasets", icon: Database },
-  { href: "/query", label: "Consultas", icon: Box },
-  { href: "/uploads", label: "Uploads", icon: UploadCloud },
   { href: "/users", label: "Usuários", icon: UsersRound },
   { href: "/tokens", label: "Tokens", icon: KeyRound },
   { href: "/database-users", label: "Usuários do banco", icon: FileKey2 },

@@ -1,6 +1,6 @@
 import { prisma } from "@/server/db";
 import { datasetSchema, slugify } from "@/server/security/naming";
-import { dropSchema,ensureSchema,grantSchema } from "@/server/azure/sql";
+import { dropSchema,dropTable,ensureSchema,grantSchema } from "@/server/azure/sql";
 
 export const projectInclude = { datasets: { where: { active: true }, include: { tables: { include: { columns: true } } } } } as const;
 export async function listProjects() { return prisma.project.findMany({ where: { active: true }, include: projectInclude, orderBy: { name: "asc" } }); }
@@ -15,6 +15,18 @@ export async function createDataset(projectId: string, input: { name: string; de
   const grants=await prisma.accessGrant.findMany({where:{OR:[{scopeType:"GLOBAL"},{scopeType:"PROJECT",projectId}]},include:{databaseUser:true}});
   for(const grant of grants){const principal=grant.userId?`cw_u_${grant.userId.replaceAll("-","").slice(0,24)}`:grant.tokenId?`cw_t_${grant.tokenId.replaceAll("-","").slice(0,24)}`:grant.databaseUser?.name;if(principal)await grantSchema(principal,schemaName,grant.permission==="READ"?"READ":"WRITE");}
   return dataset;
+}
+
+export async function deleteTable(id: string) {
+  const table = await prisma.datasetTable.findUniqueOrThrow({ where: { id }, include: { dataset: true } });
+  const uploads = await prisma.upload.findMany({ where: { tableId: id } });
+  const uploadIds = uploads.map((u) => u.id);
+  await prisma.$transaction([
+    prisma.job.deleteMany({ where: { uploadId: { in: uploadIds } } }),
+    prisma.upload.deleteMany({ where: { id: { in: uploadIds } } }),
+    prisma.datasetTable.delete({ where: { id } }),
+  ]);
+  await dropTable(table.dataset.schemaName, table.sqlName);
 }
 
 export async function deleteDataset(id: string) {
