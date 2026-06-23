@@ -42,6 +42,11 @@ export async function ensureSchema(schema: string) {
   await (await sqlPool()).request().query(`IF SCHEMA_ID(N'${escapeSqlLiteral(schema)}') IS NULL EXEC(N'CREATE SCHEMA ${q}')`);
 }
 
+export async function dropTable(schema: string, table: string) {
+  const q = `${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
+  await (await sqlPool()).request().query(`IF OBJECT_ID(N'${escapeSqlLiteral(schema)}.${escapeSqlLiteral(table)}',N'U') IS NOT NULL DROP TABLE ${q}`);
+}
+
 export async function dropSchema(schema: string) {
   const pool = await sqlPool();
   const q = quoteIdentifier(schema);
