@@ -1,0 +1,2 @@
+import type { NextRequest } from "next/server"; import { resolveActor,requireRole } from "@/server/auth/actor"; import { revokeDatabaseUser } from "@/server/data/database-users"; import { handleApiError,ok } from "@/server/http";
+export async function DELETE(request:NextRequest,{params}:{params:Promise<{id:string}>}){try{const a=await resolveActor(request);requireRole(a,["ADMIN"]);return ok(await revokeDatabaseUser((await params).id));}catch(e){return handleApiError(e)}}

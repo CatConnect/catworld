@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+[project]
+name = "catworld-sdk"
+version = "0.1.0"
+description = "Cliente oficial Python para a API Catworld"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [{ name = "CatConnect" }]
+dependencies = ["httpx>=0.27,<1"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+[tool.hatch.build.targets.wheel]
+packages = ["src/catworld"]

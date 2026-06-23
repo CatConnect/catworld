@@ -1,0 +1,12 @@
+services:
+  web:
+    build: .
+    command: ["node", "server.js"]
+    env_file: .env
+    ports: ["3000:3000"]
+    restart: unless-stopped
+  worker:
+    build: .
+    command: ["./node_modules/.bin/tsx", "src/worker/index.ts"]
+    env_file: .env
+    restart: unless-stopped

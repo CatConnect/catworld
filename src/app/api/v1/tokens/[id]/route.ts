@@ -1,0 +1,2 @@
+import type { NextRequest } from "next/server"; import { prisma } from "@/server/db"; import { resolveActor,requireRole } from "@/server/auth/actor"; import { handleApiError,ok } from "@/server/http";
+export async function DELETE(request:NextRequest,{params}:{params:Promise<{id:string}>}){try{const a=await resolveActor(request);requireRole(a,["ADMIN"]);return ok(await prisma.apiToken.update({where:{id:(await params).id},data:{active:false}}));}catch(e){return handleApiError(e)}}

@@ -1,0 +1,251 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("CATWORLD_DATABASE_URL")
+}
+
+model User {
+  id           String        @id @default(uuid()) @db.UniqueIdentifier
+  name         String        @db.NVarChar(160)
+  email        String        @unique @db.NVarChar(320)
+  passwordHash String        @map("password_hash") @db.NVarChar(500)
+  role         String        @default("VIEWER") @db.VarChar(32)
+  active       Boolean       @default(true)
+  createdAt    DateTime      @default(now()) @map("created_at") @db.DateTime2
+  updatedAt    DateTime      @updatedAt @map("updated_at") @db.DateTime2
+  grants       AccessGrant[]
+  savedQueries SavedQuery[]
+  auditEvents  AuditEvent[]
+
+  @@map("cw_users")
+}
+
+model Project {
+  id          String        @id @default(uuid()) @db.UniqueIdentifier
+  name        String        @db.NVarChar(255)
+  slug        String        @unique @db.VarChar(100)
+  description String?       @db.NVarChar(1000)
+  active      Boolean       @default(true)
+  createdAt   DateTime      @default(now()) @map("created_at") @db.DateTime2
+  updatedAt   DateTime      @updatedAt @map("updated_at") @db.DateTime2
+  datasets    Dataset[]
+  grants      AccessGrant[]
+
+  @@map("cw_projects")
+}
+
+model Dataset {
+  id          String         @id @default(uuid()) @db.UniqueIdentifier
+  projectId   String         @map("project_id") @db.UniqueIdentifier
+  name        String         @db.NVarChar(255)
+  slug        String         @db.VarChar(100)
+  description String?        @db.NVarChar(1000)
+  schemaName  String         @unique @map("schema_name") @db.VarChar(128)
+  active      Boolean        @default(true)
+  createdAt   DateTime       @default(now()) @map("created_at") @db.DateTime2
+  updatedAt   DateTime       @updatedAt @map("updated_at") @db.DateTime2
+  project     Project        @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  tables      DatasetTable[]
+  grants      AccessGrant[]
+  uploads     Upload[]
+
+  @@unique([projectId, slug])
+  @@index([projectId, active])
+  @@map("cw_datasets")
+}
+
+model DatasetTable {
+  id        String           @id @default(uuid()) @db.UniqueIdentifier
+  datasetId String           @map("dataset_id") @db.UniqueIdentifier
+  name      String           @db.NVarChar(255)
+  sqlName   String           @map("sql_name") @db.VarChar(128)
+  rowCount  BigInt           @default(0) @map("row_count")
+  sizeBytes BigInt           @default(0) @map("size_bytes")
+  createdAt DateTime         @default(now()) @map("created_at") @db.DateTime2
+  updatedAt DateTime         @updatedAt @map("updated_at") @db.DateTime2
+  dataset   Dataset          @relation(fields: [datasetId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  columns   DatasetColumn[]
+  versions  DatasetVersion[]
+  uploads   Upload[]
+
+  @@unique([datasetId, sqlName])
+  @@map("cw_tables")
+}
+
+model DatasetColumn {
+  id           String       @id @default(uuid()) @db.UniqueIdentifier
+  tableId      String       @map("table_id") @db.UniqueIdentifier
+  ordinal      Int
+  originalName String       @map("original_name") @db.NVarChar(255)
+  sqlName      String       @map("sql_name") @db.VarChar(128)
+  sqlType      String       @map("sql_type") @db.VarChar(100)
+  nullable     Boolean      @default(true)
+  table        DatasetTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+
+  @@unique([tableId, sqlName])
+  @@index([tableId, ordinal])
+  @@map("cw_columns")
+}
+
+model ApiToken {
+  id         String        @id @default(uuid()) @db.UniqueIdentifier
+  name       String        @db.NVarChar(160)
+  prefix     String        @unique @db.VarChar(24)
+  tokenHash  String        @unique @map("token_hash") @db.Char(64)
+  active     Boolean       @default(true)
+  expiresAt  DateTime?     @map("expires_at") @db.DateTime2
+  lastUsedAt DateTime?     @map("last_used_at") @db.DateTime2
+  createdAt  DateTime      @default(now()) @map("created_at") @db.DateTime2
+  grants     AccessGrant[]
+
+  @@map("cw_tokens")
+}
+
+model DatabaseUser {
+  id                String        @id @default(uuid()) @db.UniqueIdentifier
+  name              String        @unique @db.VarChar(128)
+  kind              String        @db.VarChar(32)
+  encryptedPassword String        @map("encrypted_password") @db.NVarChar(1000)
+  active            Boolean       @default(true)
+  lastUsedAt        DateTime?     @map("last_used_at") @db.DateTime2
+  createdAt         DateTime      @default(now()) @map("created_at") @db.DateTime2
+  grants            AccessGrant[]
+
+  @@map("cw_database_users")
+}
+
+model AccessGrant {
+  id             String        @id @default(uuid()) @db.UniqueIdentifier
+  userId         String?       @map("user_id") @db.UniqueIdentifier
+  tokenId        String?       @map("token_id") @db.UniqueIdentifier
+  databaseUserId String?       @map("database_user_id") @db.UniqueIdentifier
+  scopeType      String        @map("scope_type") @db.VarChar(20)
+  projectId      String?       @map("project_id") @db.UniqueIdentifier
+  datasetId      String?       @map("dataset_id") @db.UniqueIdentifier
+  permission     String        @db.VarChar(20)
+  createdAt      DateTime      @default(now()) @map("created_at") @db.DateTime2
+  user           User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token          ApiToken?     @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  databaseUser   DatabaseUser? @relation(fields: [databaseUserId], references: [id], onDelete: Cascade)
+  project        Project?      @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  dataset        Dataset?      @relation(fields: [datasetId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([userId])
+  @@index([tokenId])
+  @@index([databaseUserId])
+  @@map("cw_access_grants")
+}
+
+model Connection {
+  id                   String    @id @default(uuid()) @db.UniqueIdentifier
+  name                 String    @db.NVarChar(120)
+  environment          String    @db.VarChar(32)
+  server               String    @db.NVarChar(255)
+  databaseName         String    @map("database_name") @db.NVarChar(128)
+  username             String    @db.NVarChar(255)
+  encryptedCredentials String    @map("encrypted_credentials") @db.NVarChar(2000)
+  active               Boolean   @default(true)
+  lastStatus           String?   @map("last_status") @db.VarChar(32)
+  lastLatencyMs        Int?      @map("last_latency_ms")
+  lastCheckedAt        DateTime? @map("last_checked_at") @db.DateTime2
+  createdAt            DateTime  @default(now()) @map("created_at") @db.DateTime2
+  updatedAt            DateTime  @updatedAt @map("updated_at") @db.DateTime2
+
+  @@map("cw_connections")
+}
+
+model Upload {
+  id               String        @id @default(uuid()) @db.UniqueIdentifier
+  datasetId        String?       @map("dataset_id") @db.UniqueIdentifier
+  tableId          String?       @map("table_id") @db.UniqueIdentifier
+  originalFilename String        @map("original_filename") @db.NVarChar(500)
+  blobName         String        @unique @map("blob_name") @db.NVarChar(700)
+  sizeBytes        BigInt        @map("size_bytes")
+  mode             String        @default("replace") @db.VarChar(20)
+  keyColumn        String?       @map("key_column") @db.VarChar(128)
+  status           String        @default("PENDING_UPLOAD") @db.VarChar(32)
+  progress         Int           @default(0)
+  previewJson      String?       @map("preview_json") @db.NVarChar(Max)
+  mappingJson      String?       @map("mapping_json") @db.NVarChar(Max)
+  rowCount         BigInt?       @map("row_count")
+  insertedCount    BigInt?       @map("inserted_count")
+  updatedCount     BigInt?       @map("updated_count")
+  errorMessage     String?       @map("error_message") @db.NVarChar(Max)
+  createdAt        DateTime      @default(now()) @map("created_at") @db.DateTime2
+  updatedAt        DateTime      @updatedAt @map("updated_at") @db.DateTime2
+  dataset          Dataset?      @relation(fields: [datasetId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  table            DatasetTable? @relation(fields: [tableId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  jobs             Job[]
+
+  @@index([status, createdAt])
+  @@map("cw_uploads")
+}
+
+model DatasetVersion {
+  id         String       @id @default(uuid()) @db.UniqueIdentifier
+  tableId    String       @map("table_id") @db.UniqueIdentifier
+  uploadId   String?      @map("upload_id") @db.UniqueIdentifier
+  rowCount   BigInt       @map("row_count")
+  schemaJson String       @map("schema_json") @db.NVarChar(Max)
+  createdAt  DateTime     @default(now()) @map("created_at") @db.DateTime2
+  table      DatasetTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+
+  @@index([tableId, createdAt])
+  @@map("cw_dataset_versions")
+}
+
+model SavedQuery {
+  id          String   @id @default(uuid()) @db.UniqueIdentifier
+  userId      String   @map("user_id") @db.UniqueIdentifier
+  name        String   @db.NVarChar(200)
+  description String?  @db.NVarChar(1000)
+  sqlText     String   @map("sql_text") @db.NVarChar(Max)
+  createdAt   DateTime @default(now()) @map("created_at") @db.DateTime2
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.DateTime2
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, name])
+  @@map("cw_saved_queries")
+}
+
+model AuditEvent {
+  id           String   @id @default(uuid()) @db.UniqueIdentifier
+  userId       String?  @map("user_id") @db.UniqueIdentifier
+  tokenId      String?  @map("token_id") @db.UniqueIdentifier
+  eventType    String   @map("event_type") @db.VarChar(80)
+  resourceType String?  @map("resource_type") @db.VarChar(80)
+  resourceId   String?  @map("resource_id") @db.NVarChar(255)
+  detailJson   String?  @map("detail_json") @db.NVarChar(Max)
+  ipAddress    String?  @map("ip_address") @db.VarChar(64)
+  success      Boolean  @default(true)
+  createdAt    DateTime @default(now()) @map("created_at") @db.DateTime2
+  user         User?    @relation(fields: [userId], references: [id])
+
+  @@index([createdAt])
+  @@index([eventType, createdAt])
+  @@map("cw_audit_events")
+}
+
+model Job {
+  id          String    @id @default(uuid()) @db.UniqueIdentifier
+  type        String    @db.VarChar(50)
+  status      String    @default("QUEUED") @db.VarChar(20)
+  uploadId    String?   @map("upload_id") @db.UniqueIdentifier
+  payloadJson String?   @map("payload_json") @db.NVarChar(Max)
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3) @map("max_attempts")
+  availableAt DateTime  @default(now()) @map("available_at") @db.DateTime2
+  lockedAt    DateTime? @map("locked_at") @db.DateTime2
+  lockedBy    String?   @map("locked_by") @db.VarChar(120)
+  heartbeatAt DateTime? @map("heartbeat_at") @db.DateTime2
+  lastError   String?   @map("last_error") @db.NVarChar(Max)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.DateTime2
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.DateTime2
+  upload      Upload?   @relation(fields: [uploadId], references: [id])
+
+  @@index([status, availableAt])
+  @@map("cw_jobs")
+}

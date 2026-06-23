@@ -1,0 +1,4 @@
+import { hash } from "@node-rs/argon2";import { PrismaClient } from "@prisma/client";
+const prisma=new PrismaClient();
+async function main(){const email=(process.env.CATWORLD_ADMIN_EMAIL??"admin@example.com").toLowerCase(),password=process.env.CATWORLD_ADMIN_PASSWORD;if(!password)throw new Error("Defina CATWORLD_ADMIN_PASSWORD para executar o seed");const admin=await prisma.user.upsert({where:{email},update:{active:true,role:"ADMIN"},create:{name:process.env.CATWORLD_ADMIN_NAME??"Administrador",email,passwordHash:await hash(password),role:"ADMIN"}});await prisma.accessGrant.upsert({where:{id:`00000000-0000-0000-0000-000000000001`},update:{},create:{id:`00000000-0000-0000-0000-000000000001`,userId:admin.id,scopeType:"GLOBAL",permission:"ADMIN"}});console.log(`Seed concluído para ${email}`)}
+main().finally(()=>prisma.$disconnect());

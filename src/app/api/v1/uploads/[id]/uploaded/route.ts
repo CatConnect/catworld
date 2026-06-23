@@ -1,0 +1,2 @@
+import type { NextRequest } from "next/server";import { prisma } from "@/server/db";import { resolveActor } from "@/server/auth/actor";import { handleApiError,ok } from "@/server/http";
+export async function POST(r:NextRequest,{params}:{params:Promise<{id:string}>}){try{await resolveActor(r);const id=(await params).id;const [,job]=await prisma.$transaction([prisma.upload.update({where:{id},data:{status:"QUEUED_PREVIEW",progress:5}}),prisma.job.create({data:{type:"PREVIEW_UPLOAD",uploadId:id}})]);return ok(job,undefined,202);}catch(e){return handleApiError(e)}}

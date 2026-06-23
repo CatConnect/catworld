@@ -1,0 +1,102 @@
+import sql from "mssql";
+import { env } from "@/server/env";
+import { quoteIdentifier } from "@/server/security/naming";
+import { validateReadOnlySql } from "@/server/security/sql-safety";
+import { ApiError } from "@/server/http";
+
+function parsePrismaSqlServerUrl(url: string): sql.config {
+  const withoutScheme = url.replace(/^sqlserver:\/\//i, "");
+  const [hostPort, ...rest] = withoutScheme.split(";").filter(Boolean);
+  const [server, port] = hostPort.split(":");
+  const params = Object.fromEntries(rest.map((part) => { const i = part.indexOf("="); return [part.slice(0, i).toLowerCase(), part.slice(i + 1)]; }));
+  if (!server) throw new Error("CATWORLD_DATABASE_URL inválida: host ausente");
+  return {
+    server,
+    port: port ? Number(port) : 1433,
+    database: params.database,
+    user: params.user,
+    password: params.password,
+    options: { encrypt: params.encrypt !== "false", trustServerCertificate: params.trustservercertificate === "true" },
+  };
+}
+
+const globalPool = globalThis as unknown as { catworldSqlPool?: Promise<sql.ConnectionPool> };
+export function sqlPool() {
+  if (!globalPool.catworldSqlPool) {
+    const pool = new sql.ConnectionPool(parsePrismaSqlServerUrl(env().CATWORLD_DATABASE_URL));
+    pool.on("error", () => { if (globalPool.catworldSqlPool) globalPool.catworldSqlPool = undefined; });
+    globalPool.catworldSqlPool = pool.connect().catch((err) => { globalPool.catworldSqlPool = undefined; throw err; });
+  }
+  return globalPool.catworldSqlPool;
+}
+
+export async function checkSql() {
+  const started = Date.now();
+  const pool = await sqlPool();
+  const result = await pool.request().query("SELECT 1 AS ok, DB_NAME() AS database_name");
+  return { latencyMs: Date.now() - started, database: result.recordset[0]?.database_name };
+}
+
+export async function ensureSchema(schema: string) {
+  const q = quoteIdentifier(schema);
+  await (await sqlPool()).request().query(`IF SCHEMA_ID(N'${escapeSqlLiteral(schema)}') IS NULL EXEC(N'CREATE SCHEMA ${q}')`);
+}
+
+export async function dropSchema(schema: string) {
+  const pool = await sqlPool();
+  const q = quoteIdentifier(schema);
+  const tables = await pool.request().query(`SELECT t.name FROM sys.tables t JOIN sys.schemas s ON t.schema_id=s.schema_id WHERE s.name=N'${escapeSqlLiteral(schema)}'`);
+  for (const row of tables.recordset as { name: string }[]) await pool.request().query(`DROP TABLE ${q}.${quoteIdentifier(row.name)}`);
+  await pool.request().query(`IF SCHEMA_ID(N'${escapeSqlLiteral(schema)}') IS NOT NULL DROP SCHEMA ${q}`);
+}
+
+export async function ensureInternalPrincipal(principal: string) {
+  const q = quoteIdentifier(principal);
+  await (await sqlPool()).request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(principal)}') IS NULL CREATE USER ${q} WITHOUT LOGIN`);
+}
+
+export async function grantSchema(principal: string, schema: string, permission: "READ" | "WRITE") {
+  const user = quoteIdentifier(principal), target = quoteIdentifier(schema);
+  const grants = permission === "READ" ? ["SELECT"] : ["SELECT", "INSERT", "UPDATE", "DELETE"];
+  await ensureInternalPrincipal(principal);
+  for (const grant of grants) await (await sqlPool()).request().query(`GRANT ${grant} ON SCHEMA::${target} TO ${user}`);
+}
+
+export async function revokeSchema(principal: string, schema: string) {
+  const user = quoteIdentifier(principal), target = quoteIdentifier(schema);
+  for (const grant of ["SELECT", "INSERT", "UPDATE", "DELETE"]) await (await sqlPool()).request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(principal)}') IS NOT NULL REVOKE ${grant} ON SCHEMA::${target} FROM ${user}`);
+}
+
+export async function executeReadOnly(principal: string, query: string, timeout = 30, limit = 10_000) {
+  const validated = validateReadOnlySql(query);
+  if (!validated.safe) throw new ApiError(400, "UNSAFE_SQL", validated.reason);
+  const pool = await sqlPool();
+  const transaction = new sql.Transaction(pool);
+  await transaction.begin();
+  try {
+    const request = new sql.Request(transaction);
+    (request as unknown as { timeout: number }).timeout = Math.min(Math.max(timeout, 1), 120) * 1000;
+    await request.query(`EXECUTE AS USER = N'${escapeSqlLiteral(principal)}'`);
+    const started = Date.now();
+    const result = await request.query(validated.statement);
+    const rows = result.recordset?.slice(0, limit) ?? [];
+    await request.query("REVERT");
+    await transaction.commit();
+    return { columns: result.recordset?.columns ? Object.keys(result.recordset.columns) : Object.keys(rows[0] ?? {}), rows, rowCount: rows.length, truncated: (result.recordset?.length ?? 0) > limit, executionTimeMs: Date.now() - started };
+  } catch (error) {
+    await transaction.rollback().catch(() => undefined);
+    throw error;
+  }
+}
+
+export async function createExternalDatabaseUser(name: string, password: string) {
+  const q = quoteIdentifier(name);
+  await (await sqlPool()).request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(name)}') IS NOT NULL DROP USER ${q}; CREATE USER ${q} WITH PASSWORD = N'${escapeSqlLiteral(password)}'`);
+}
+export async function rotateExternalDatabaseUser(name: string, password: string) {
+  await (await sqlPool()).request().query(`ALTER USER ${quoteIdentifier(name)} WITH PASSWORD = N'${escapeSqlLiteral(password)}'`);
+}
+export async function dropExternalDatabaseUser(name: string) {
+  await (await sqlPool()).request().query(`IF DATABASE_PRINCIPAL_ID(N'${escapeSqlLiteral(name)}') IS NOT NULL DROP USER ${quoteIdentifier(name)}`);
+}
+export const escapeSqlLiteral = (value: string) => value.replaceAll("'", "''");

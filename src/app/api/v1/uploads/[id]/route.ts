@@ -1,0 +1,2 @@
+import type { NextRequest } from "next/server";import { prisma } from "@/server/db";import { resolveActor } from "@/server/auth/actor";import { handleApiError,ok } from "@/server/http";
+export async function GET(r:NextRequest,{params}:{params:Promise<{id:string}>}){try{await resolveActor(r);return ok(await prisma.upload.findUniqueOrThrow({where:{id:(await params).id},include:{dataset:true,table:true,jobs:true}}));}catch(e){return handleApiError(e)}}
