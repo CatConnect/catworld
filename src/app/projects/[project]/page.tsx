@@ -1,2 +1,36 @@
-import Link from "next/link";import { notFound } from "next/navigation";import { ArrowRight,Database,UploadCloud } from "lucide-react";import { prisma } from "@/server/db";import { PageHeader,Panel } from "@/components/ui/primitives";import { CopyableId } from "@/components/ui/copyable-id";import { CreateCatalogDialog } from "@/components/management/create-catalog-dialog";import { EditCatalogDialog } from "@/components/management/edit-catalog-dialog";import { resolveActor } from "@/server/auth/actor";import { visibleProjectIds } from "@/server/auth/permissions";export const dynamic="force-dynamic";
-export default async function ProjectPage({params}:{params:Promise<{project:string}>}){const actor=await resolveActor(),ids=await visibleProjectIds(actor);const p=await prisma.project.findFirst({where:{slug:(await params).project,...(ids?{id:{in:ids}}:{})},include:{datasets:{where:{active:true},include:{tables:true}}}});if(!p)notFound();return <div className="space-y-6"><PageHeader eyebrow="Projeto" title={p.name} description={p.description??undefined} actions={<><EditCatalogDialog kind="project" id={p.id} name={p.name} description={p.description} active={p.active}/><CreateCatalogDialog kind="dataset" projectId={p.id}/><Link href="/uploads" className="btn btn-outline btn-sm"><UploadCloud size={16}/>Novo upload</Link></>}/><CopyableId value={p.id} label="Project ID"/><Panel title="Datasets"><div className="divide-y divide-base-300">{p.datasets.map(d=><div key={d.id} className="flex items-center gap-4 px-5 py-4 hover:bg-base-200"><Link href={`/projects/${p.slug}/datasets/${d.slug}`} className="flex min-w-0 flex-1 items-center gap-4"><span className="grid size-10 place-items-center rounded-xl bg-primary/10 text-primary"><Database size={19}/></span><div className="min-w-0 flex-1"><p className="font-medium">{d.name}</p><p className="truncate text-xs text-base-content/50">{d.description}</p></div><span className="text-xs text-base-content/45">{d.tables.length} tabelas</span></Link><EditCatalogDialog kind="dataset" id={d.id} name={d.name} description={d.description} active={d.active}/><Link href={`/projects/${p.slug}/datasets/${d.slug}`} className="btn btn-ghost btn-sm btn-square"><ArrowRight size={16}/></Link></div>)}</div></Panel></div>}
+import { notFound } from "next/navigation";
+import { prisma } from "@/server/db";
+import { ProjectWorkspace } from "@/components/workspace/project-workspace";
+import { resolveActor } from "@/server/auth/actor";
+import { visibleProjectIds } from "@/server/auth/permissions";
+export const dynamic = "force-dynamic";
+
+export default async function ProjectPage({ params }: { params: Promise<{ project: string }> }) {
+  const actor = await resolveActor(), ids = await visibleProjectIds(actor);
+  const p = await prisma.project.findFirst({
+    where: { slug: (await params).project, ...(ids ? { id: { in: ids } } : {}) },
+    include: { datasets: { where: { active: true }, include: { tables: { include: { columns: { orderBy: { ordinal: "asc" } } } } } } },
+  });
+  if (!p) notFound();
+  const project = {
+    id: p.id,
+    name: p.name,
+    description: p.description,
+    active: p.active,
+    datasets: p.datasets.map((d) => ({
+      id: d.id,
+      name: d.name,
+      description: d.description,
+      active: d.active,
+      schemaName: d.schemaName,
+      tables: d.tables.map((t) => ({
+        id: t.id,
+        name: t.name,
+        sqlName: t.sqlName,
+        rowCount: String(t.rowCount),
+        columns: t.columns.map((c) => ({ id: c.id, sqlName: c.sqlName, originalName: c.originalName, sqlType: c.sqlType, nullable: c.nullable })),
+      })),
+    })),
+  };
+  return <ProjectWorkspace project={project} />;
+}
