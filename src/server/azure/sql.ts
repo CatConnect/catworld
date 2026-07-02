@@ -101,10 +101,13 @@ const tableMap = new Map<string, string[]>();
       for (const table of unqualified) {
         const found = tableMap.get(table.toLowerCase()) ?? [];
         if (found.length > 1) {
-          throw new ApiError(400, "AMBIGUOUS_TABLE", `Tabela '${table}' existe em múltiplos schemas: ${found.join(", ")}. Use schema.tabela para qualificar.`);
+          throw new ApiError(400, "AMBIGUOUS_TABLE", `Tabela '${table}' existe em múltiplos datasets do contexto: ${found.join(", ")}. Use schema.tabela para qualificar.`);
         }
         if (found.length === 1) {
           statement = qualifyTable(statement, table, found[0]!);
+        }
+        if (found.length === 0) {
+          throw new ApiError(400, "TABLE_NOT_FOUND", `Tabela '${table}' não encontrada no contexto informado. Verifique o dataset_id ou project_id.`);
         }
       }
     }
