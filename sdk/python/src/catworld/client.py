@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json as _json
 import logging
 import time
 from pathlib import Path
@@ -8,11 +9,11 @@ from typing import Any
 import httpx
 
 from .exceptions import (
-    AuthenticationError,
     ConnectionError,
-    PermissionDeniedError,
     QueryTimeoutError,
+    UploadError,
     ValidationError,
+    from_api_error,
 )
 
 logger = logging.getLogger("catworld")
@@ -34,11 +35,10 @@ class CatworldClient:
             headers={"Authorization": f"Bearer {token}"},
             timeout=timeout,
         )
-        logger.debug("Cliente inicializado: base_url=%s timeout=%ss", base_url, timeout)
+        logger.debug("Conectado a %s", base_url)
 
     def close(self):
         self._client.close()
-        logger.debug("Cliente encerrado")
 
     def __enter__(self):
         return self
@@ -58,15 +58,29 @@ class CatworldClient:
     def rows(self, table_id: str, limit: int = 100):
         return self._request("GET", f"/api/v1/tables/{table_id}/rows", params={"limit": limit})
 
-    def query(self, sql: str, timeout: int = 30, limit: int = 10000, dataset_id: str | None = None, project_id: str | None = None):
-        logger.info("Executando query (timeout=%ss, limit=%s)", timeout, limit)
+    def query(
+        self,
+        sql: str,
+        timeout: int = 30,
+        limit: int = 10000,
+        dataset_id: str | None = None,
+        project_id: str | None = None,
+    ):
+        context = f"dataset={dataset_id}" if dataset_id else f"project={project_id}" if project_id else "sem contexto"
+        logger.info("Executando query [%s, timeout=%ss, limit=%s]", context, timeout, limit)
+
         payload: dict = {"sql": sql, "timeout": timeout, "limit": limit}
         if dataset_id:
             payload["datasetId"] = dataset_id
         if project_id:
             payload["projectId"] = project_id
+
         result = self._request("POST", "/api/v1/queries", json=payload, timeout=None)
-        logger.info("Query concluída: %s linhas retornadas", len(result) if isinstance(result, list) else "?")
+        logger.info(
+            "Query concluída: %s linha(s) em %sms",
+            result.get("rowCount", "?"),
+            result.get("executionTimeMs", "?"),
+        )
         return result
 
     def upload(
@@ -78,9 +92,12 @@ class CatworldClient:
         poll_interval: float = 2,
     ):
         file = Path(path)
+        if not file.exists():
+            raise FileNotFoundError(f"Arquivo não encontrado: {file}")
         size = file.stat().st_size
+
         logger.info(
-            "Iniciando upload: arquivo=%s tamanho=%s dataset_id=%s modo=%s",
+            "Iniciando upload: %s (%s) → dataset=%s [modo=%s]",
             file.name, _fmt_bytes(size), dataset_id, mode,
         )
 
@@ -90,33 +107,34 @@ class CatworldClient:
             json={"filename": file.name, "sizeBytes": size},
         )
         upload_id = created["upload"]["id"]
-        logger.debug("Upload registrado: id=%s", upload_id)
 
-        logger.info("Enviando arquivo para storage: %s (%s)", file.name, _fmt_bytes(size))
-        with file.open("rb") as stream:
-            response = self._client.put(
-                created["sas"]["url"],
-                content=stream,
-                headers={"content-type": "application/octet-stream"},
-                timeout=None,
-            )
-        response.raise_for_status()
-        logger.info("Arquivo enviado com sucesso")
+        logger.info("Enviando arquivo para storage...")
+        for attempt in range(3):
+            with file.open("rb") as stream:
+                response = self._client.put(
+                    created["sas"]["url"],
+                    content=stream,
+                    headers={"content-type": "application/octet-stream"},
+                    timeout=None,
+                )
+            if response.status_code != 499 or attempt == 2:
+                response.raise_for_status()
+                break
+            logger.warning("Conexão encerrada pelo servidor (499), tentativa %s/3...", attempt + 1)
+            time.sleep(1)
+        logger.info("Arquivo enviado, aguardando processamento...")
 
         self._request("POST", f"/api/v1/uploads/{upload_id}/uploaded")
-        logger.debug("Notificação de upload enviada, aguardando preview...")
+        preview = self._wait_upload(upload_id, "AWAITING_CONFIRMATION", poll_interval)
 
-        preview = self._wait(upload_id, "AWAITING_CONFIRMATION", poll_interval)
-
-        import json as _json
         mapping = preview["previewJson"]
         if isinstance(mapping, str):
             mapping = _json.loads(mapping)
 
-        logger.info(
-            "Preview gerado: %s colunas detectadas, confirmando importação...",
-            len(mapping.get("columns", [])),
-        )
+        cols = mapping.get("columns", [])
+        logger.info("%s coluna(s) detectada(s): %s", len(cols), [c.get("name", c) for c in cols[:5]])
+        logger.info("Confirmando importação...")
+
         self._request(
             "POST",
             f"/api/v1/uploads/{upload_id}/confirm",
@@ -124,58 +142,49 @@ class CatworldClient:
                 "datasetId": dataset_id,
                 "mode": mode,
                 "keyColumn": key_column,
-                "mapping": mapping["columns"],
+                "mapping": cols,
             },
         )
 
-        result = self._wait(upload_id, "COMPLETED", poll_interval)
-        logger.info("Upload concluído: id=%s arquivo=%s", upload_id, file.name)
+        result = self._wait_upload(upload_id, "COMPLETED", poll_interval)
+        logger.info("Upload concluído: %s linha(s) importada(s)", result.get("rowCount", "?"))
         return result
 
-    def _wait(self, upload_id: str, target: str, interval: float):
+    def _wait_upload(self, upload_id: str, target: str, interval: float):
         last_status = None
         for _ in range(1800):
             upload = self._request("GET", f"/api/v1/uploads/{upload_id}", timeout=None)
             status = upload["status"]
             if status != last_status:
-                logger.info("Upload %s: status=%s", upload_id, status)
+                logger.info("  → %s", status)
                 last_status = status
-            else:
-                logger.debug("Upload %s: aguardando status=%s (atual=%s)", upload_id, target, status)
             if status == target:
                 return upload
             if status == "FAILED":
-                msg = upload.get("errorMessage") or "Upload falhou"
-                logger.error("Upload %s falhou: %s", upload_id, msg)
-                raise ValidationError(msg)
+                msg = upload.get("errorMessage") or "Falha no processamento do arquivo"
+                raise UploadError(msg)
             time.sleep(interval)
-        raise QueryTimeoutError("Tempo de processamento excedido")
+        raise QueryTimeoutError("Tempo de processamento do upload excedido")
 
     def _request(self, method: str, path: str, **kwargs) -> Any:
-        logger.debug("→ %s %s", method, path)
         try:
             response = self._client.request(method, path, **kwargs)
+        except httpx.TimeoutException as exc:
+            raise QueryTimeoutError(f"Tempo limite excedido ao conectar com o servidor: {exc}") from exc
         except httpx.HTTPError as exc:
-            logger.error("Erro de conexão: %s %s — %s", method, path, exc)
-            raise ConnectionError(str(exc)) from exc
+            raise ConnectionError(f"Falha de conexão com o servidor: {exc}") from exc
 
         if response.is_success:
-            logger.debug("← %s %s %s", method, path, response.status_code)
             return response.json()["data"]
 
         try:
             body = response.json()
         except Exception:
             body = {}
-        message = body.get("error", {}).get("message") or response.text or f"HTTP {response.status_code}"
-        logger.warning("← %s %s %s: %s", method, path, response.status_code, message)
 
-        if response.status_code == 401:
-            raise AuthenticationError(message)
-        if response.status_code == 403:
-            raise PermissionDeniedError(message)
-        if response.status_code in (400, 422):
-            raise ValidationError(message)
-        if response.status_code == 408:
-            raise QueryTimeoutError(message)
-        raise ConnectionError(message)
+        error = body.get("error", {})
+        code = error.get("code")
+        message = error.get("message") or response.text or f"HTTP {response.status_code}"
+
+        logger.debug("Erro da API: [%s] %s", code, message)
+        raise from_api_error(code, message)

@@ -1,3 +1,29 @@
 from .client import CatworldClient
-from .exceptions import AuthenticationError,CatworldError,ConnectionError,PermissionDeniedError,QueryTimeoutError,ValidationError
-__all__=["CatworldClient","CatworldError","AuthenticationError","PermissionDeniedError","ValidationError","QueryTimeoutError","ConnectionError"]
+from .exceptions import (
+    AmbiguousTableError,
+    AuthenticationError,
+    CatworldError,
+    ConnectionError,
+    NotFoundError,
+    PermissionDeniedError,
+    QueryTimeoutError,
+    TableNotFoundError,
+    UnsafeSqlError,
+    UploadError,
+    ValidationError,
+)
+
+__all__ = [
+    "CatworldClient",
+    "CatworldError",
+    "AuthenticationError",
+    "PermissionDeniedError",
+    "NotFoundError",
+    "TableNotFoundError",
+    "AmbiguousTableError",
+    "ValidationError",
+    "UnsafeSqlError",
+    "QueryTimeoutError",
+    "UploadError",
+    "ConnectionError",
+]
