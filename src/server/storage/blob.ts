@@ -1,6 +1,19 @@
-import { BlobServiceClient } from "@azure/storage-blob";
+import {
+  BlobServiceClient,
+  BlobSASPermissions,
+  StorageSharedKeyCredential,
+  generateBlobSASQueryParameters,
+} from "@azure/storage-blob";
 import { Readable } from "node:stream";
+import { extname } from "node:path";
 import { env } from "@/server/env";
+
+const MIME: Record<string, string> = {
+  ".csv": "text/csv; charset=utf-8",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".xls": "application/vnd.ms-excel",
+  ".tsv": "text/tab-separated-values; charset=utf-8",
+};
 
 function containerClient() {
   const e = env();
@@ -8,10 +21,21 @@ function containerClient() {
   return service.getContainerClient(e.CATWORLD_AZURE_BLOB_CONTAINER);
 }
 
+function sharedKeyCredential(): StorageSharedKeyCredential {
+  const connStr = env().CATWORLD_AZURE_BLOB_CONNECTION_STRING!;
+  const accountMatch = connStr.match(/AccountName=([^;]+)/i);
+  const keyMatch = connStr.match(/AccountKey=([^;]+)/i);
+  if (!accountMatch || !keyMatch) throw new Error("Connection string inválida para gerar SAS");
+  return new StorageSharedKeyCredential(accountMatch[1]!, keyMatch[1]!);
+}
+
 export async function writeBlob(blobName: string, body: ReadableStream<Uint8Array>) {
   const client = containerClient().getBlockBlobClient(blobName);
   const stream = Readable.fromWeb(body as Parameters<typeof Readable.fromWeb>[0]);
-  await client.uploadStream(stream, 8 * 1024 * 1024, 4);
+  const contentType = MIME[extname(blobName).toLowerCase()] ?? "application/octet-stream";
+  await client.uploadStream(stream, 8 * 1024 * 1024, 4, {
+    blobHTTPHeaders: { blobContentType: contentType },
+  });
 }
 
 export async function downloadBlob(blobName: string): Promise<NodeJS.ReadableStream> {
@@ -29,18 +53,18 @@ export async function ensureContainer() {
   await containerClient().createIfNotExists();
 }
 
-export async function generateBlobSasUrl(blobName: string, expiryMs = 60 * 60_000): Promise<string> {
-  const { generateBlobSASQueryParameters, BlobSASPermissions, StorageSharedKeyCredential } = await import("@azure/storage-blob");
+export function generateBlobSasUrl(blobName: string, expiryMs = 60 * 60_000): string {
   const e = env();
-  const connStr = e.CATWORLD_AZURE_BLOB_CONNECTION_STRING!;
-  const accountMatch = connStr.match(/AccountName=([^;]+)/i);
-  const keyMatch = connStr.match(/AccountKey=([^;]+)/i);
-  if (!accountMatch || !keyMatch) throw new Error("Connection string inválida para gerar SAS");
-  const credential = new StorageSharedKeyCredential(accountMatch[1]!, keyMatch[1]!);
+  const credential = sharedKeyCredential();
   const expiresOn = new Date(Date.now() + expiryMs);
   const sas = generateBlobSASQueryParameters(
     { containerName: e.CATWORLD_AZURE_BLOB_CONTAINER, blobName, permissions: BlobSASPermissions.parse("r"), expiresOn },
     credential
   );
-  return `https://${accountMatch[1]!}.blob.core.windows.net/${e.CATWORLD_AZURE_BLOB_CONTAINER}/${blobName}?${sas}`;
+  const accountName = e.CATWORLD_AZURE_BLOB_CONNECTION_STRING!.match(/AccountName=([^;]+)/i)![1]!;
+  return `https://${accountName}.blob.core.windows.net/${e.CATWORLD_AZURE_BLOB_CONTAINER}/${blobName}?${sas}`;
+}
+
+export function blobAccountName(): string {
+  return env().CATWORLD_AZURE_BLOB_CONNECTION_STRING!.match(/AccountName=([^;]+)/i)![1]!;
 }
