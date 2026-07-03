@@ -27,3 +27,7 @@ sdk/python/pytest-cache-files-*/
 
 # Sentry Config File
 .env.sentry-build-plugin
+src/app/api/sentry-example-api/
+src/app/sentry-example-page/
+src/instrumentation-client.ts
+src/instrumentation.ts
