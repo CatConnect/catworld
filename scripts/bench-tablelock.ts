@@ -62,7 +62,7 @@ async function main() {
       const bulk = new sql.Table(`${SCHEMA}.${TABLE}`);
       bulk.create = false;
       for (const col of bulkCols) bulk.columns.add(col.name, col.type, { nullable: true });
-      for (const row of batch) bulk.rows.add(...converters.map((fn, i) => fn(row[preview.columns[i]!.sqlName])));
+      for (const row of batch) bulk.rows.add(...(converters.map((fn, i) => fn(row[preview.columns[i]!.sqlName])) as Parameters<typeof bulk.rows.add>));
       await new sql.Request(pool).bulk(bulk, { tableLock });
       total += batch.length; batch = [];
       process.stdout.write(`\r   ${total.toLocaleString()} linhas inseridas`);
