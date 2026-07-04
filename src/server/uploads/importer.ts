@@ -14,6 +14,7 @@ export async function importUpload(uploadId:string,path:string){
  // Usa rowCount salvo no preview — evita segundo scan completo do arquivo
  const knownRowCount=Number(upload.rowCount??0);
 
+ if(!mapping.length)throw new Error("Nenhuma coluna mapeada — verifique o mapeamento do arquivo");
  const tableName=upload.table?.sqlName??sqlIdentifier(upload.originalFilename.replace(/\.[^.]+$/,""));
  const schema=upload.dataset.schemaName;
  const stage=`cw_stage_${upload.id.replaceAll("-","").slice(0,20)}`;
