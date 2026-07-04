@@ -122,16 +122,19 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
     inserted=total;
    }else if(phase2){
     // Option 3 Phase 2: toInsert rows already in target (BULK INSERT completed above).
-    // Delete toDelete hashes using a temp table — safe because INSERT happened before transaction.
+    // Delete toDelete hashes using a single SQL batch to avoid cross-query temp table visibility issues.
     inserted=total;
     if(toDelete.length>0){
      const BATCH=500;
-     await request.query(`IF OBJECT_ID('tempdb..#cw_del','U') IS NOT NULL DROP TABLE #cw_del; CREATE TABLE #cw_del (rh CHAR(32))`);
+     // Build the entire DELETE as one batch: CREATE #cw_del, batch INSERTs, DELETE JOIN, SELECT count
+     let deleteSql="IF OBJECT_ID('tempdb..#cw_del','U') IS NOT NULL DROP TABLE #cw_del;\nCREATE TABLE #cw_del (rh CHAR(32));\n";
      for(let i=0;i<toDelete.length;i+=BATCH){
       const vals=toDelete.slice(i,i+BATCH).map(h=>`('${h}')`).join(",");
-      await request.query(`INSERT INTO #cw_del VALUES ${vals}`);
+      deleteSql+=`INSERT INTO #cw_del VALUES ${vals};\n`;
      }
-     const delRes=await request.query(`DELETE t FROM ${target} t JOIN #cw_del d ON t.[_cw_rh]=d.rh; SELECT @@ROWCOUNT deleted`);
+     // Save @@ROWCOUNT into variable before DROP so the SELECT returns delete count
+     deleteSql+=`DELETE t FROM ${target} t JOIN #cw_del d ON t.[_cw_rh]=d.rh;\nDECLARE @deleted INT=@@ROWCOUNT;\nDROP TABLE #cw_del;\nSELECT @deleted deleted;`;
+     const delRes=await request.query(deleteSql);
      updated=Number(delRes.recordset[0]?.deleted??0);
     }
    }else if(deltaReplace){
