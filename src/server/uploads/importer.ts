@@ -24,18 +24,31 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
  const staging=`${quoteIdentifier(schema)}.${quoteIdentifier(stage)}`;
  const colDefs=mapping.map(c=>`${quoteIdentifier(c.sqlName)} ${c.sqlType} ${c.nullable?"NULL":"NOT NULL"}`).join(",");
 
+ // Check target existence once — used for both schema validation and Option 2 direct replace
+ const targetExists=Number((await pool.request().query(`SELECT CASE WHEN OBJECT_ID(N'${schema}.${tableName}',N'U') IS NULL THEN 0 ELSE 1 END AS ok`)).recordset[0].ok)===1;
+
  // P5: Validate schema compatibility BEFORE creating staging — fail fast on bad append/upsert
- if(upload.mode==="append"||upload.mode==="upsert"){
-  const exists=Number((await pool.request().query(`SELECT CASE WHEN OBJECT_ID(N'${schema}.${tableName}',N'U') IS NULL THEN 0 ELSE 1 END AS ok`)).recordset[0].ok)===1;
-  if(exists)await assertCompatible(pool.request(),schema,tableName,mapping);
+ if((upload.mode==="append"||upload.mode==="upsert")&&targetExists){
+  await assertCompatible(pool.request(),schema,tableName,mapping);
  }
 
- await pool.request().query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}; CREATE TABLE ${staging} (${colDefs})`);
+ // Option 2 — direct replace: if target exists with same schema, TRUNCATE + BULK INSERT directly
+ // Eliminates expensive CREATE TABLE staging DDL (up to 5 min on S1 for 500+ column tables)
+ const directReplace=upload.mode==="replace"&&targetExists&&await schemaMatchesSilent(pool,schema,tableName,mapping);
+
+ if(directReplace){
+  await pool.request().query(`TRUNCATE TABLE ${target}`);
+ }else{
+  await pool.request().query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}; CREATE TABLE ${staging} (${colDefs})`);
+ }
 
  let total=0,inserted=0,updated=0,lastProgressMs=Date.now();
 
  try{
   const useBlob=!!env().CATWORLD_AZURE_BLOB_CONNECTION_STRING;
+
+  // Option 2: direct replace uses target table as destination; otherwise use staging
+  const destTable=directReplace?tableName:stage;
 
   if(useBlob){
    // P0+P1: Stream source → convert → temp blob → BULK INSERT (no disk, no TDS overhead)
@@ -43,7 +56,7 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
    const preview=upload.previewJson?JSON.parse(upload.previewJson) as FilePreview:null;
    const ext=extname(upload.originalFilename).toLowerCase();
    const opts:RowsFromFileOpts={encoding:preview?.encoding??"utf8",separator:preview?.separator??",",ext};
-   total=await bulkInsertFromBlob(uploadId,source,mapping,schema,stage,opts,(n)=>{
+   total=await bulkInsertFromBlob(uploadId,source,mapping,schema,destTable,opts,(n)=>{
     const now=Date.now();
     if(now-lastProgressMs>10_000){
      void prisma.upload.update({where:{id:upload.id},data:{progress:Math.min(75,35+Math.floor(n/Math.max(knownRowCount,1)*40))}});
@@ -58,7 +71,7 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
    let batch:Record<string,unknown>[]=[];
    const flush=async()=>{
     if(!batch.length)return;
-    const bulk=new sql.Table(`${schema}.${stage}`);
+    const bulk=new sql.Table(`${schema}.${destTable}`);
     bulk.create=false;
     for(const col of bulkCols)bulk.columns.add(col.name,col.type,col.opts);
     for(const row of batch)bulk.rows.add(...(converters.map((fn,i)=>fn(row[mapping[i]!.sqlName])) as Parameters<typeof bulk.rows.add>));
@@ -71,7 +84,7 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
      lastProgressMs=now;
     }
    };
-   for await(const row of rowsFromFile(source as string,mapping)){batch.push(row);if(batch.length>=50_000)await flush()}
+   for await(const row of rowsFromFile(source as string,mapping,{ext:extname(upload.originalFilename).toLowerCase()})){batch.push(row);if(batch.length>=50_000)await flush()}
    await flush();
   }
 
@@ -80,8 +93,10 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
   await tx.begin();
   try{
    const request=new sql.Request(tx);
-   const targetExists=Number((await request.query(`SELECT CASE WHEN OBJECT_ID(N'${schema}.${tableName}',N'U') IS NULL THEN 0 ELSE 1 END AS ok`)).recordset[0].ok)===1;
-   if(upload.mode==="replace"||!targetExists){
+   if(directReplace){
+    // Option 2: data already in target via direct BULK INSERT — nothing to swap
+    inserted=total;
+   }else if(upload.mode==="replace"||!targetExists){
     if(targetExists)await request.query(`DROP TABLE ${target}`);
     await request.query(`EXEC sp_rename N'${schema}.${stage}',N'${tableName}'`);
     inserted=total;
@@ -134,6 +149,15 @@ function makeConverter(type:string):(v:unknown)=>unknown{
  if(type==="DATE"||type==="DATETIME2")return v=>{if(v==null||String(v).trim()==="")return null;const s=String(v).trim(),br=s.match(/^(\d{2})\/(\d{2})\/(\d{4})(.*)$/),iso=br?`${br[3]}-${br[2]}-${br[1]}${br[4]}`:s;return new Date(type==="DATE"?iso.slice(0,10)+"T00:00:00Z":iso)};
  if(type==="TIME")return v=>{if(v==null||String(v).trim()==="")return null;const s=String(v).trim();const p=s.split(":");const h=parseInt(p[0]??"0",10),m=parseInt(p[1]??"0",10),sec=parseFloat(p[2]??"0");if(isNaN(h)||isNaN(m)||h>23)return null;return new Date(1970,0,1,h,m,Math.floor(sec),Math.round((sec%1)*1000))};
  return v=>v==null||String(v).trim()===""?null:String(v);
+}
+
+async function schemaMatchesSilent(pool:sql.ConnectionPool,schema:string,table:string,mapping:ParsedColumn[]):Promise<boolean>{
+ try{
+  const result=await pool.request().input("schema",sql.NVarChar,schema).input("table",sql.NVarChar,table).query("SELECT c.name FROM sys.columns c WHERE c.object_id=OBJECT_ID(QUOTENAME(@schema)+'.'+QUOTENAME(@table)) ORDER BY c.column_id");
+  const actual=result.recordset.map((r:Record<string,unknown>)=>String(r.name));
+  const expected=mapping.map(c=>c.sqlName);
+  return JSON.stringify(actual)===JSON.stringify(expected);
+ }catch{return false}
 }
 
 async function assertCompatible(request:sql.Request,schema:string,table:string,columns:ParsedColumn[]){const result=await request.input("schema",sql.NVarChar,schema).input("table",sql.NVarChar,table).query("SELECT c.name,t.name type_name,c.max_length,c.precision,c.scale FROM sys.columns c JOIN sys.types t ON c.user_type_id=t.user_type_id WHERE c.object_id=OBJECT_ID(QUOTENAME(@schema)+'.'+QUOTENAME(@table)) ORDER BY c.column_id");const actual=result.recordset.map(r=>String(r.name));const expected=columns.map(c=>c.sqlName);if(JSON.stringify(actual)!==JSON.stringify(expected))throw new Error(`Schema incompatível. Esperado: ${expected.join(", ")}; atual: ${actual.join(", ")}`)}

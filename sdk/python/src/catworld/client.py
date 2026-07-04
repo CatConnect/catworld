@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip as _gzip
+import hashlib as _hashlib
 import io as _io
 import json as _json
 import logging
@@ -103,15 +104,24 @@ class CatworldClient:
             file.name, _fmt_bytes(size), dataset_id, mode,
         )
 
+        # Option 1 — hash skip: compute MD5 before upload so server can detect unchanged files
+        raw_bytes = file.read_bytes()
+        file_hash = _hashlib.md5(raw_bytes).hexdigest()
+        logger.debug("Hash MD5: %s", file_hash)
+
         created = self._request(
             "POST",
             "/api/v1/uploads",
-            json={"filename": file.name, "sizeBytes": size},
+            json={"filename": file.name, "sizeBytes": size, "fileHash": file_hash, "datasetId": dataset_id},
         )
+
+        if created.get("skip"):
+            logger.info("[SKIP] Arquivo inalterado, importação ignorada: %s", file.name)
+            return created["upload"]
+
         upload_id = created["upload"]["id"]
 
         logger.info("Comprimindo e enviando arquivo para storage...")
-        raw_bytes = file.read_bytes()
         compressed = _gzip.compress(raw_bytes, compresslevel=1)
         ratio = len(compressed) / len(raw_bytes) if raw_bytes else 1
         logger.info(
