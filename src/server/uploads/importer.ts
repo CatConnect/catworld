@@ -63,6 +63,7 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
  }
 
  let total=0,inserted=0,updated=0,lastProgressMs=Date.now();
+ let deleteCleanBlob: (()=>Promise<void>)|undefined; // P3: cleanup after successful commit
 
  try{
   const ext=extname(upload.originalFilename).toLowerCase();
@@ -77,16 +78,28 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
    // P2: No batch delay needed — SQL Server throttles BULK INSERT internally
    const preview=upload.previewJson?JSON.parse(upload.previewJson) as FilePreview:null;
    const opts:RowsFromFileOpts={encoding:preview?.encoding??"utf8",separator:preview?.separator??",",ext};
-   const blobResult=await bulkInsertFromBlob(uploadId,source,mapping,schema,destTable,opts,(n)=>{
-    const now=Date.now();
-    if(now-lastProgressMs>10_000){
-     void prisma.upload.update({where:{id:upload.id},data:{progress:Math.min(75,35+Math.floor(n/Math.max(knownRowCount,1)*40))}});
-     lastProgressMs=now;
-    }
-   },phase2,knownRowCount);
-   total=blobResult.total;
-   phaseTimings.importMethod="blob-bulk";
-   phaseTimings.bulkBlob=blobResult;
+    const blobResult=await bulkInsertFromBlob(uploadId,source,mapping,schema,destTable,opts,(n)=>{
+     const now=Date.now();
+     if(now-lastProgressMs>10_000){
+      void prisma.upload.update({where:{id:upload.id},data:{progress:Math.min(75,35+Math.floor(n/Math.max(knownRowCount,1)*40))}});
+      lastProgressMs=now;
+     }
+    },phase2,knownRowCount);
+    total=blobResult.total;
+    phaseTimings.importMethod="blob-bulk";
+    phaseTimings.bulkBlob=blobResult;
+    // P3: BULK INSERT succeeded — data is in staging/target. Delete clean blob now;
+    //      if transaction fails below, the next retry re-generates the clean blob from source.
+    let cleanBlobDeleted=false;
+    deleteCleanBlob=async()=>{
+     if(cleanBlobDeleted||!env().CATWORLD_AZURE_BLOB_CONNECTION_STRING)return;
+     cleanBlobDeleted=true;
+     const{BlobServiceClient}=await import("@azure/storage-blob");
+     const{env:getEnv}=await import("@/server/env");
+     const eBlob=getEnv();
+     const s=BlobServiceClient.fromConnectionString(eBlob.CATWORLD_AZURE_BLOB_CONNECTION_STRING!);
+     await s.getContainerClient(eBlob.CATWORLD_AZURE_BLOB_CONTAINER).getBlockBlobClient(blobResult.cleanBlobName).delete().catch(()=>{});
+    };
   }else{
    // Fallback: TDS bulk copy — used when blob storage is not configured (local dev)
    phaseTimings.importMethod=smallCsv?"tds-small-csv":"tds-fallback";
@@ -205,37 +218,48 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
    }
    const actual=Number((await request.query(`SELECT COUNT_BIG(*) count FROM ${target}`)).recordset[0].count);
    await tx.commit();
+   // P3: Clean up the temporary blob now that the transaction is committed
+   if(typeof deleteCleanBlob==="function")await deleteCleanBlob();
    const table=upload.table??await prisma.datasetTable.upsert({where:{datasetId_sqlName:{datasetId:upload.dataset.id,sqlName:tableName}},update:{},create:{datasetId:upload.dataset.id,name:tableName,sqlName:tableName}});
    phaseTimings.totalImportMs=Date.now()-importStarted;
    console.log("[importUpload:perf]",JSON.stringify({uploadId:upload.id,file:upload.originalFilename,rows:actual,...phaseTimings}));
-    const colReq=pool.request();
-    colReq.input("tableId",sql.UniqueIdentifier,table.id);
-    colReq.input("uploadId",sql.UniqueIdentifier,upload.id);
-    colReq.input("actual",sql.BigInt,actual);
-    colReq.input("inserted",sql.BigInt,inserted);
-    colReq.input("updated",sql.BigInt,updated);
-    colReq.input("schemaJson",sql.NVarChar(sql.MAX),JSON.stringify(mapping));
-    colReq.input("detailJson",sql.NVarChar(sql.MAX),JSON.stringify({file:upload.originalFilename,rows:actual,...phaseTimings}));
-    const colValues=mapping.map((c,i)=>{
-     colReq.input(`orig${i}`,sql.NVarChar(255),c.originalName);
-     colReq.input(`sqlName${i}`,sql.VarChar(128),c.sqlName);
-     colReq.input(`sqlType${i}`,sql.VarChar(100),c.sqlType);
-     colReq.input(`nullable${i}`,sql.Bit,c.nullable);
-     return `(NEWID(),@tableId,${i+1},@orig${i},@sqlName${i},@sqlType${i},@nullable${i})`;
-    }).join(",");
-    await colReq.query(`
+
+    // P4: Batch column metadata inserts to stay under SQL Server 2100-parameter limit.
+    // Each column needs 4 inputs (orig+i, sqlName+i, sqlType+i, nullable+i) → max 524 cols per batch.
+    const MAX_COLS_PER_BATCH=500;
+    for(let batchStart=0;batchStart<mapping.length;batchStart+=MAX_COLS_PER_BATCH){
+     const batch=mapping.slice(batchStart,batchStart+MAX_COLS_PER_BATCH);
+     const colReq=pool.request();
+     colReq.input("tableId",sql.UniqueIdentifier,table.id);
+     colReq.input("uploadId",sql.UniqueIdentifier,upload.id);
+     colReq.input("actual",sql.BigInt,actual);
+     colReq.input("inserted",sql.BigInt,inserted);
+     colReq.input("updated",sql.BigInt,updated);
+     colReq.input("schemaJson",sql.NVarChar(sql.MAX),JSON.stringify(mapping));
+     colReq.input("detailJson",sql.NVarChar(sql.MAX),JSON.stringify({file:upload.originalFilename,rows:actual,...phaseTimings}));
+     const colValues=batch.map((c,i)=>{
+      const gi=batchStart+i;
+      colReq.input(`orig${gi}`,sql.NVarChar(255),c.originalName);
+      colReq.input(`sqlName${gi}`,sql.VarChar(128),c.sqlName);
+      colReq.input(`sqlType${gi}`,sql.VarChar(100),c.sqlType);
+      colReq.input(`nullable${gi}`,sql.Bit,c.nullable);
+      return `(NEWID(),@tableId,${gi+1},@orig${gi},@sqlName${gi},@sqlType${gi},@nullable${gi})`;
+     }).join(",");
+     const isFirst=batchStart===0;
+     await colReq.query(`
       BEGIN TRANSACTION
-      DECLARE @lk INT
+      ${isFirst?`DECLARE @lk INT
       EXEC @lk=sp_getapplock @Resource='ColUpd_${table.id}',@LockMode='Exclusive',@LockTimeout=120000
       IF @lk<0 THROW 50000,'lock timeout',1
-      DELETE FROM dbo.cw_columns WHERE table_id=@tableId
+      DELETE FROM dbo.cw_columns WHERE table_id=@tableId`:""}
       INSERT INTO dbo.cw_columns(id,table_id,ordinal,original_name,sql_name,sql_type,nullable)VALUES${colValues}
-      UPDATE dbo.cw_tables SET row_count=@actual,updated_at=SYSUTCDATETIME()WHERE id=@tableId
+      ${isFirst?`UPDATE dbo.cw_tables SET row_count=@actual,updated_at=SYSUTCDATETIME()WHERE id=@tableId
       INSERT INTO dbo.cw_dataset_versions(id,table_id,upload_id,row_count,schema_json)VALUES(NEWID(),@tableId,@uploadId,@actual,@schemaJson)
       INSERT INTO dbo.cw_audit_events(id,event_type,resource_type,resource_id,detail_json,success)VALUES(NEWID(),'UPLOAD_IMPORT_PERF','upload',@uploadId,@detailJson,1)
-      UPDATE dbo.cw_uploads SET table_id=@tableId,status='COMPLETED',progress=100,row_count=@actual,inserted_count=@inserted,updated_count=@updated,updated_at=SYSUTCDATETIME()WHERE id=@uploadId
+      UPDATE dbo.cw_uploads SET table_id=@tableId,status='COMPLETED',progress=100,row_count=@actual,inserted_count=@inserted,updated_count=@updated,updated_at=SYSUTCDATETIME()WHERE id=@uploadId`:""}
       COMMIT
-    `);
+     `);
+    }
     return{tableId:table.id,inserted,updated,rowCount:actual};
   }catch(e){await tx.rollback().catch(()=>undefined);throw e}
  }catch(e){
@@ -247,7 +271,7 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
 function makeConverter(type:string):(v:unknown)=>unknown{
  if(type==="BIGINT")return v=>v==null||String(v).trim()===""?null:String(v);
  if(type.startsWith("DECIMAL"))return v=>{if(v==null||String(v).trim()==="")return null;const s=String(v).trim();return Number(s.includes(",")?s.replaceAll(".","").replace(",","."):s)};
- if(type==="DATE"||type==="DATETIME2")return v=>{if(v==null||String(v).trim()==="")return null;const s=String(v).trim(),iso=normalizeDateLike(s)??s;return new Date(type==="DATE"?iso.slice(0,10)+"T00:00:00Z":iso)};
+ if(type==="DATE"||type==="DATETIME2")return v=>{if(v==null||String(v).trim()==="")return null;const s=String(v).trim();try{const iso=normalizeDateLike(s)??s;const date=new Date(s);if(isNaN(date.getTime()))return null;return date}catch{return null}};
  if(type==="TIME")return v=>{if(v==null||String(v).trim()==="")return null;const s=String(v).trim();const p=s.split(":");const h=parseInt(p[0]??"0",10),m=parseInt(p[1]??"0",10),sec=parseFloat(p[2]??"0");if(isNaN(h)||isNaN(m)||h>23)return null;return new Date(1970,0,1,h,m,Math.floor(sec),Math.round((sec%1)*1000))};
  return v=>v==null||String(v).trim()===""?null:String(v);
 }

@@ -206,7 +206,6 @@ export async function bulkInsertFromBlob(
   } finally {
     await pool.request().query(`IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name='${tempDs}') DROP EXTERNAL DATA SOURCE [${tempDs}]`).catch(() => {});
     await pool.request().query(`IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name='${tempCred}') DROP DATABASE SCOPED CREDENTIAL [${tempCred}]`).catch(() => {});
-    await blockClient.delete().catch(() => {});
   }
 
   return { total, timings, cleanBlobName, reusedCleanBlob, bulkAttempts };
