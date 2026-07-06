@@ -48,9 +48,8 @@ function makeCleanConverter(type: string): (v: unknown) => string {
   if (type === "DATETIME2") {
     return v => {
       if (v == null || String(v).trim() === "") return "";
-      const s = String(v).trim();
-      const iso = normalizeDateLike(s) ?? s;
-      return new Date(iso).toISOString().replace("T", " ").replace("Z", "");
+      const iso = normalizeDateLike(String(v).trim());
+      return iso ? iso.replace("T", " ") : "";
     };
   }
   if (type === "TIME") return v => (v == null || String(v).trim() === "") ? "" : String(v).trim();
@@ -93,51 +92,69 @@ export async function bulkInsertFromBlob(
   const converters = mapping.map(c => makeCleanConverter(c.sqlType));
 
   let total = 0;
-  const reusedCleanBlob = await mark("cleanBlobExistsMs", () => blockClient.exists());
-  if (reusedCleanBlob) {
-    total = knownRowCount;
-  } else {
-    await mark("convertUploadCleanBlobMs", async () => {
-      const passThrough = new PassThrough();
-      const uploadPromise = blockClient.uploadStream(passThrough, 8 * 1024 * 1024, 4, {
-        blobHTTPHeaders: { blobContentType: "text/csv; charset=utf-8" },
-      });
+  const reusedCleanBlob = false;
 
-      if (isPreProcessed) {
-        let remainder = "";
-        for await (const chunk of source as NodeJS.ReadableStream) {
-          const text = remainder + (chunk as Buffer).toString("utf8");
-          const lines = text.split("\n");
-          remainder = lines.pop() ?? "";
-          for (const line of lines) {
-            if (line) {
-              passThrough.write(line + "\n");
-              total++;
-              if (total % 50_000 === 0) onProgress?.(total);
-            }
+  await mark("convertUploadCleanBlobMs", async () => {
+    // Remove any partial blob from a previous failed attempt to prevent reusing corrupt data
+    if (await blockClient.exists()) {
+      await blockClient.delete().catch(() => {});
+    }
+
+    const passThrough = new PassThrough({ highWaterMark: 65536 });
+    const uploadPromise = blockClient.uploadStream(passThrough, 8 * 1024 * 1024, 4, {
+      blobHTTPHeaders: { blobContentType: "text/csv; charset=utf-8" },
+    });
+
+    if (isPreProcessed) {
+      let remainder = "";
+      for await (const chunk of source as NodeJS.ReadableStream) {
+        const text = remainder + (chunk as Buffer).toString("utf8");
+        const lines = text.split("\n");
+        remainder = lines.pop() ?? "";
+        for (const line of lines) {
+          if (line) {
+            passThrough.write(line + "\n");
+            total++;
+            if (total % 50_000 === 0) onProgress?.(total);
           }
         }
-        if (remainder.trim()) {
-          passThrough.write(remainder + "\n");
-          total++;
-        }
-      } else {
-        for await (const row of rowsFromFile(source, mapping, opts)) {
-          const converted = converters.map((fn, i) => fn(row[mapping[i]!.sqlName]));
-          const csvLine = converted.join("|");
-          const rowHash = createHash("md5").update(csvLine).digest("hex");
-          passThrough.write(csvLine + "|" + rowHash + "\n");
-          total++;
-          if (total % 50_000 === 0) onProgress?.(total);
+      }
+      if (remainder.trim()) {
+        passThrough.write(remainder + "\n");
+        total++;
+      }
+    } else {
+      for await (const row of rowsFromFile(source, mapping, opts)) {
+        const converted = converters.map((fn, i) => fn(row[mapping[i]!.sqlName]));
+        const csvLine = converted.join("|");
+        const rowHash = createHash("md5").update(csvLine).digest("hex");
+        passThrough.write(csvLine + "|" + rowHash + "\n");
+        total++;
+        if (total % 50_000 === 0) onProgress?.(total);
+      }
+    }
+
+    passThrough.end();
+    await uploadPromise;
+
+    // Poll blob availability up to 30s (Azure eventual consistency can be slow for large blobs)
+    const pollStarted = Date.now();
+    let blobVerified = false;
+    while (Date.now() - pollStarted < 30_000) {
+      const exists = await blockClient.exists();
+      if (exists) {
+        const props = await blockClient.getProperties();
+        if (props.contentLength && props.contentLength > 0) {
+          blobVerified = true;
+          break;
         }
       }
-
-      passThrough.end();
-      await uploadPromise;
-    });
-  }
-
-  await mark("blobConsistencyWaitMs", () => new Promise(r => setTimeout(r, 3000)));
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    if (!blobVerified) {
+      throw new Error(`Clean blob inaccessible or empty after upload (polled 30s)`);
+    }
+  });
 
   const credential = new StorageSharedKeyCredential(account, key);
 
@@ -195,11 +212,28 @@ export async function bulkInsertFromBlob(
         break;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        let detail = message;
+
+        // Extract precedingErrors from mssql — they contain the real error (row, column, conversion type)
+        if (error && typeof error === "object" && "precedingErrors" in error) {
+          const preceding = (error as { precedingErrors: unknown[] }).precedingErrors;
+          if (preceding && preceding.length > 0) {
+            detail += " | precedingErrors: " + preceding.map(e => e instanceof Error ? e.message : String(e)).join("; ");
+          }
+        }
+
+        // Include SQL error number/state for diagnostics
+        if (error instanceof Error && "number" in error) {
+          detail += ` | sqlNumber=${(error as Error & { number: number }).number}`;
+        }
+
         if (attempt >= 5 || !message.includes('OLE DB provider "BULK"')) {
-          throw error;
+          const enhanced = new Error(detail);
+          enhanced.stack = (error instanceof Error ? error.stack : undefined);
+          throw enhanced;
         }
         const waitMs = 5_000 * attempt;
-        console.warn(`[bulkInsert] transient BULK provider error, retry ${attempt}/5 in ${waitMs}ms: ${message}`);
+        console.warn(`[bulkInsert] transient BULK provider error, retry ${attempt}/5 in ${waitMs}ms: ${detail}`);
         await mark("bulkRetryWaitMs", () => new Promise(r => setTimeout(r, waitMs)));
       }
     }
