@@ -1,5 +1,6 @@
 import { extname } from "node:path";
 import sql from "mssql";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db";
 import { sqlPool } from "@/server/azure/sql";
 import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
@@ -208,8 +209,17 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
    const table=upload.table??await prisma.datasetTable.upsert({where:{datasetId_sqlName:{datasetId:upload.dataset.id,sqlName:tableName}},update:{},create:{datasetId:upload.dataset.id,name:tableName,sqlName:tableName}});
    phaseTimings.totalImportMs=Date.now()-importStarted;
    console.log("[importUpload:perf]",JSON.stringify({uploadId:upload.id,file:upload.originalFilename,rows:actual,...phaseTimings}));
-   await prisma.$transaction([prisma.datasetColumn.deleteMany({where:{tableId:table.id}}),...mapping.map((c,i)=>prisma.datasetColumn.create({data:{tableId:table.id,ordinal:i+1,originalName:c.originalName,sqlName:c.sqlName,sqlType:c.sqlType,nullable:c.nullable}})),prisma.datasetTable.update({where:{id:table.id},data:{rowCount:BigInt(actual)}}),prisma.datasetVersion.create({data:{tableId:table.id,uploadId:upload.id,rowCount:BigInt(actual),schemaJson:JSON.stringify(mapping)}}),prisma.auditEvent.create({data:{eventType:"UPLOAD_IMPORT_PERF",resourceType:"upload",resourceId:upload.id,detailJson:JSON.stringify({file:upload.originalFilename,rows:actual,...phaseTimings}),success:true}}),prisma.upload.update({where:{id:upload.id},data:{tableId:table.id,status:"COMPLETED",progress:100,rowCount:BigInt(actual),insertedCount:BigInt(inserted),updatedCount:BigInt(updated)}})]);
-   return{tableId:table.id,inserted,updated,rowCount:actual};
+    await prisma.$transaction(async (tx)=>{
+     await tx.datasetColumn.deleteMany({where:{tableId:table.id}});
+     for(const[i,c]of mapping.entries()){
+      await tx.datasetColumn.create({data:{tableId:table.id,ordinal:i+1,originalName:c.originalName,sqlName:c.sqlName,sqlType:c.sqlType,nullable:c.nullable}});
+     }
+     await tx.datasetTable.update({where:{id:table.id},data:{rowCount:BigInt(actual)}});
+     await tx.datasetVersion.create({data:{tableId:table.id,uploadId:upload.id,rowCount:BigInt(actual),schemaJson:JSON.stringify(mapping)}});
+     await tx.auditEvent.create({data:{eventType:"UPLOAD_IMPORT_PERF",resourceType:"upload",resourceId:upload.id,detailJson:JSON.stringify({file:upload.originalFilename,rows:actual,...phaseTimings}),success:true}});
+     await tx.upload.update({where:{id:upload.id},data:{tableId:table.id,status:"COMPLETED",progress:100,rowCount:BigInt(actual),insertedCount:BigInt(inserted),updatedCount:BigInt(updated)}});
+    },{isolationLevel:Prisma.TransactionIsolationLevel.Serializable,maxWait:10000,timeout:30000});
+    return{tableId:table.id,inserted,updated,rowCount:actual};
   }catch(e){await tx.rollback().catch(()=>undefined);throw e}
  }catch(e){
   await pool.request().query(`IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging}`).catch(()=>undefined);
