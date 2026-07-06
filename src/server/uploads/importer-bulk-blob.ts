@@ -10,7 +10,6 @@ import { sqlPool } from "@/server/azure/sql";
 import { quoteIdentifier } from "@/server/security/naming";
 import { rowsFromFile, type ParsedColumn, type RowsFromFileOpts } from "./parser";
 import { env } from "@/server/env";
-import { normalizeDateLike } from "./date-normalize";
 
 export type BulkBlobResult = {
   total: number;
@@ -28,40 +27,16 @@ function blobEnv() {
   return { connStr, account: accountMatch[1]!, key: keyMatch[1]!, container: e.CATWORLD_AZURE_BLOB_CONTAINER };
 }
 
-function makeCleanConverter(type: string): (v: unknown) => string {
-  if (type === "BIGINT") return v => (v == null || String(v).trim() === "") ? "" : String(v).trim();
-  if (type.startsWith("DECIMAL")) {
-    return v => {
-      if (v == null || String(v).trim() === "") return "";
-      const s = String(v).trim();
-      const num = Number(s.includes(",") ? s.replaceAll(".", "").replace(",", ".") : s);
-      return isNaN(num) ? "" : num.toFixed(4);
-    };
-  }
-  if (type === "DATE") {
-    return v => {
-      if (v == null || String(v).trim() === "") return "";
-      const s = String(v).trim();
-      return normalizeDateLike(s)?.slice(0, 10) ?? "";
-    };
-  }
-  if (type === "DATETIME2") {
-    return v => {
-      if (v == null || String(v).trim() === "") return "";
-      const iso = normalizeDateLike(String(v).trim());
-      return iso ? iso.replace("T", " ") : "";
-    };
-  }
-  if (type === "TIME") return v => (v == null || String(v).trim() === "") ? "" : String(v).trim();
-  return v => {
-    if (v == null || String(v).trim() === "") return '""';
-    // Sanitize control characters and field delimiter to prevent BULK INSERT misalignment
-    const sanitized = String(v)
-      .replace(/"/g, '""')   // escape double quotes for CSV
-      .replace(/[\n\r\t]/g, " ")  // replace newlines/tabs with space
-      .replace(/\|/g, " ");       // replace pipe delimiter with space
-    return '"' + sanitized + '"';
-  };
+/** Sanitize a single value for NVARCHAR bulk-insert CSV output.
+ *  Escapes double-quotes, replaces control characters with space,
+ *  and wraps in double-quotes. Returns '""' for null/empty. */
+export function sanitizeCsvField(v: unknown): string {
+  if (v == null || String(v).trim() === "") return '""';
+  const sanitized = String(v)
+    .replace(/"/g, '""')
+    .replace(/[\n\r\t]/g, " ")
+    .replace(/\|/g, " ");
+  return '"' + sanitized + '"';
 }
 
 export async function bulkInsertFromBlob(
@@ -89,13 +64,11 @@ export async function bulkInsertFromBlob(
 
   const service = BlobServiceClient.fromConnectionString(connStr);
   const blockClient = service.getContainerClient(container).getBlockBlobClient(cleanBlobName);
-  const converters = mapping.map(c => makeCleanConverter(c.sqlType));
 
   let total = 0;
   const reusedCleanBlob = false;
 
   await mark("convertUploadCleanBlobMs", async () => {
-    // Remove any partial blob from a previous failed attempt to prevent reusing corrupt data
     if (await blockClient.exists()) {
       await blockClient.delete().catch(() => {});
     }
@@ -125,8 +98,7 @@ export async function bulkInsertFromBlob(
       }
     } else {
       for await (const row of rowsFromFile(source, mapping, opts)) {
-        const converted = converters.map((fn, i) => fn(row[mapping[i]!.sqlName]));
-        const csvLine = converted.join("|");
+        const csvLine = mapping.map(c => sanitizeCsvField(row[c.sqlName])).join("|");
         const rowHash = createHash("md5").update(csvLine).digest("hex");
         passThrough.write(csvLine + "|" + rowHash + "\n");
         total++;
@@ -137,7 +109,6 @@ export async function bulkInsertFromBlob(
     passThrough.end();
     await uploadPromise;
 
-    // Poll blob availability up to 30s (Azure eventual consistency can be slow for large blobs)
     const pollStarted = Date.now();
     let blobVerified = false;
     while (Date.now() - pollStarted < 30_000) {
@@ -164,6 +135,29 @@ export async function bulkInsertFromBlob(
   const tempDs = `CatworldBulkDS_${hash}`;
   let bulkAttempts = 0;
 
+  // Combine DROP + CREATE into single batch per object to eliminate race conditions
+  async function ensureCredential(sas: string) {
+    await pool.request().query(`
+      IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name='${tempCred}')
+        DROP DATABASE SCOPED CREDENTIAL [${tempCred}];
+      CREATE DATABASE SCOPED CREDENTIAL [${tempCred}]
+      WITH IDENTITY = 'SHARED ACCESS SIGNATURE', SECRET = '${sas}'
+    `);
+  }
+
+  async function ensureDataSource() {
+    await pool.request().query(`
+      IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name='${tempDs}')
+        DROP EXTERNAL DATA SOURCE [${tempDs}];
+      CREATE EXTERNAL DATA SOURCE [${tempDs}]
+      WITH (
+        TYPE = BLOB_STORAGE,
+        LOCATION = 'https://${account}.blob.core.windows.net',
+        CREDENTIAL = [${tempCred}]
+      )
+    `);
+  }
+
   try {
     const bulkReq = pool.request();
     (bulkReq as unknown as { timeout: number }).timeout = 30 * 60_000;
@@ -186,35 +180,25 @@ export async function bulkInsertFromBlob(
     for (let attempt = 1; ; attempt++) {
       bulkAttempts = attempt;
       try {
-        // Drop stale credential/datasource before every attempt (survives failed cleanup from prior runs)
-        await pool.request().query(`IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name='${tempDs}') DROP EXTERNAL DATA SOURCE [${tempDs}]`);
-        await pool.request().query(`IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name='${tempCred}') DROP DATABASE SCOPED CREDENTIAL [${tempCred}]`);
+        // Truncate staging on retry (was partially loaded on previous attempt)
         if (attempt > 1) {
           await pool.request().query(`TRUNCATE TABLE ${quoteIdentifier(schema)}.${quoteIdentifier(stagingTable)}`);
         }
 
-        // Fresh SAS + credential/datasource each attempt so expired tokens don't block retries
+        // Fresh SAS token + atomic DROP+CREATE per attempt
         const sas = generateBlobSASQueryParameters(
           { containerName: container, blobName: cleanBlobName, permissions: BlobSASPermissions.parse("r"), expiresOn: new Date(Date.now() + 60 * 60_000) },
           credential
         ).toString();
 
-        await pool.request().query(`
-          CREATE DATABASE SCOPED CREDENTIAL [${tempCred}]
-          WITH IDENTITY = 'SHARED ACCESS SIGNATURE', SECRET = '${sas}'
-        `);
-        await pool.request().query(`
-          CREATE EXTERNAL DATA SOURCE [${tempDs}]
-          WITH (TYPE = BLOB_STORAGE, LOCATION = 'https://${account}.blob.core.windows.net', CREDENTIAL = [${tempCred}])
-        `);
-
+        await ensureCredential(sas);
+        await ensureDataSource();
         await mark("bulkInsertMs", () => bulkReq.query(bulkSql));
         break;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         let detail = message;
 
-        // Extract precedingErrors from mssql — they contain the real error (row, column, conversion type)
         if (error && typeof error === "object" && "precedingErrors" in error) {
           const preceding = (error as { precedingErrors: unknown[] }).precedingErrors;
           if (preceding && preceding.length > 0) {
@@ -222,7 +206,6 @@ export async function bulkInsertFromBlob(
           }
         }
 
-        // Include SQL error number/state for diagnostics
         if (error instanceof Error && "number" in error) {
           detail += ` | sqlNumber=${(error as Error & { number: number }).number}`;
         }
@@ -238,8 +221,9 @@ export async function bulkInsertFromBlob(
       }
     }
   } finally {
-    await pool.request().query(`IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name='${tempDs}') DROP EXTERNAL DATA SOURCE [${tempDs}]`).catch(() => {});
-    await pool.request().query(`IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name='${tempCred}') DROP DATABASE SCOPED CREDENTIAL [${tempCred}]`).catch(() => {});
+    // Cleanup: drop data source first (depends on credential), then credential
+    await pool.request().query(`DROP EXTERNAL DATA SOURCE IF EXISTS [${tempDs}]`).catch(() => {});
+    await pool.request().query(`DROP DATABASE SCOPED CREDENTIAL IF EXISTS [${tempCred}]`).catch(() => {});
   }
 
   return { total, timings, cleanBlobName, reusedCleanBlob, bulkAttempts };

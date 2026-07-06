@@ -27,8 +27,10 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
  const pool=await sqlPool();
  const target=`${quoteIdentifier(schema)}.${quoteIdentifier(tableName)}`;
  const staging=`${quoteIdentifier(schema)}.${quoteIdentifier(stage)}`;
- // _cw_rh always appended — enables Hash Diff delta on subsequent replace runs
- const colDefs=mapping.map(c=>`${quoteIdentifier(c.sqlName)} ${c.sqlType} ${c.nullable?"NULL":"NOT NULL"}`).join(",")+",[_cw_rh] CHAR(32) NULL";
+  // All columns imported as NVARCHAR(MAX) NULL — strong typing is optional post-processing.
+  // This eliminates type-mismatch errors on bulk insert and preserves leading zeros,
+  // Brazilian decimals, mixed numeric/text columns, and ambiguous date formats.
+  const colDefs=mapping.map(c=>`${quoteIdentifier(c.sqlName)} NVARCHAR(MAX) NULL`).join(",")+",[_cw_rh] CHAR(32) NULL";
 
  // Check target existence once — used for both schema validation and Option 2 direct replace
  const targetExists=Number((await pool.request().query(`SELECT CASE WHEN OBJECT_ID(N'${schema}.${tableName}',N'U') IS NULL THEN 0 ELSE 1 END AS ok`)).recordset[0].ok)===1;
@@ -102,34 +104,35 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
     };
   }else{
    // Fallback: TDS bulk copy — used when blob storage is not configured (local dev)
-   phaseTimings.importMethod=smallCsv?"tds-small-csv":"tds-fallback";
-   const batchDelay=env().CATWORLD_IMPORT_BATCH_DELAY_MS;
-   const converters=mapping.map(c=>makeConverter(c.sqlType));
-   const bulkCols=mapping.map(c=>({name:c.sqlName,type:toSqlType(c.sqlType),opts:{nullable:c.nullable}}));
-   let batch:Record<string,unknown>[]=[];
-   const tdsStarted=Date.now();
-   const flush=async()=>{
-    if(!batch.length)return;
-    const bulk=new sql.Table(`${schema}.${destTable}`);
-    bulk.create=false;
-    for(const col of bulkCols)bulk.columns.add(col.name,col.type,col.opts);
-    bulk.columns.add("_cw_rh",sql.Char(32),{nullable:true});
-    for(const row of batch){
-     const vals=converters.map((fn,i)=>fn(row[mapping[i]!.sqlName]));
-     const {createHash:ch}=await import("node:crypto");
-     const rh=ch("md5").update(vals.map(v=>v==null?"":String(v)).join("|")).digest("hex");
-     vals.push(rh);
-     bulk.rows.add(...(vals as Parameters<typeof bulk.rows.add>));
-    }
-    await new sql.Request(pool).bulk(bulk,{tableLock:true});
-    total+=batch.length;batch=[];
-    if(batchDelay>0)await new Promise(r=>setTimeout(r,batchDelay));
-    const now=Date.now();
-    if(now-lastProgressMs>10_000){
-     await prisma.upload.update({where:{id:upload.id},data:{progress:Math.min(90,35+Math.floor(total/Math.max(knownRowCount,1)*55))}});
-     lastProgressMs=now;
-    }
-   };
+    phaseTimings.importMethod=smallCsv?"tds-small-csv":"tds-fallback";
+    const batchDelay=env().CATWORLD_IMPORT_BATCH_DELAY_MS;
+    const stringify=(v:unknown)=>v==null||String(v).trim()===""?null:String(v);
+    let batch:Record<string,unknown>[]=[];
+    const tdsStarted=Date.now();
+    const flush=async()=>{
+     if(!batch.length)return;
+     const bulk=new sql.Table(`${schema}.${destTable}`);
+     bulk.create=false;
+     for(const c of mapping){
+      bulk.columns.add(c.sqlName,sql.NVarChar(sql.MAX),{nullable:true});
+     }
+     bulk.columns.add("_cw_rh",sql.Char(32),{nullable:true});
+     for(const row of batch){
+      const vals=mapping.map(c=>stringify(row[c.sqlName]));
+      const {createHash:ch}=await import("node:crypto");
+      const rh=ch("md5").update(vals.map(v=>v==null?"":String(v)).join("|")).digest("hex");
+      vals.push(rh);
+      bulk.rows.add(...(vals as Parameters<typeof bulk.rows.add>));
+     }
+     await new sql.Request(pool).bulk(bulk,{tableLock:true});
+     total+=batch.length;batch=[];
+     if(batchDelay>0)await new Promise(r=>setTimeout(r,batchDelay));
+     const now=Date.now();
+     if(now-lastProgressMs>10_000){
+      await prisma.upload.update({where:{id:upload.id},data:{progress:Math.min(90,35+Math.floor(total/Math.max(knownRowCount,1)*55))}});
+      lastProgressMs=now;
+     }
+    };
    const preview=upload.previewJson?JSON.parse(upload.previewJson) as FilePreview:null;
    const opts:RowsFromFileOpts={encoding:preview?.encoding??"utf8",separator:preview?.separator??",",ext};
    for await(const row of rowsFromFile(source,mapping,opts)){batch.push(row);if(batch.length>=50_000)await flush()}
@@ -216,13 +219,16 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
     updated=Number(merge.recordset[0]?.updated??0);
     inserted=Number(merge.recordset[0]?.inserted??0);
    }
-   const actual=Number((await request.query(`SELECT COUNT_BIG(*) count FROM ${target}`)).recordset[0].count);
-   await tx.commit();
+    const countStr=(await request.query(`SELECT COUNT_BIG(*) count FROM ${target}`)).recordset[0].count as string;
+    const actual=BigInt(countStr);
+    const MAX_BIGINT=9223372036854775807n;
+    if(actual>MAX_BIGINT||actual<0n)throw new Error(`Row count ${countStr} for table ${target} exceeds SQL Server BIGINT range (max ${MAX_BIGINT}). Verify table data integrity.`);
+    await tx.commit();
    // P3: Clean up the temporary blob now that the transaction is committed
    if(typeof deleteCleanBlob==="function")await deleteCleanBlob();
    const table=upload.table??await prisma.datasetTable.upsert({where:{datasetId_sqlName:{datasetId:upload.dataset.id,sqlName:tableName}},update:{},create:{datasetId:upload.dataset.id,name:tableName,sqlName:tableName}});
    phaseTimings.totalImportMs=Date.now()-importStarted;
-   console.log("[importUpload:perf]",JSON.stringify({uploadId:upload.id,file:upload.originalFilename,rows:actual,...phaseTimings}));
+    console.log("[importUpload:perf]",JSON.stringify({uploadId:upload.id,file:upload.originalFilename,rows:Number(actual),...phaseTimings}));
 
     // P4: Batch column metadata inserts to stay under SQL Server 2100-parameter limit.
     // Each column needs 4 inputs (orig+i, sqlName+i, sqlType+i, nullable+i) → max 524 cols per batch.
@@ -236,7 +242,7 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
      colReq.input("inserted",sql.BigInt,inserted);
      colReq.input("updated",sql.BigInt,updated);
      colReq.input("schemaJson",sql.NVarChar(sql.MAX),JSON.stringify(mapping));
-     colReq.input("detailJson",sql.NVarChar(sql.MAX),JSON.stringify({file:upload.originalFilename,rows:actual,...phaseTimings}));
+      colReq.input("detailJson",sql.NVarChar(sql.MAX),JSON.stringify({file:upload.originalFilename,rows:Number(actual),...phaseTimings}));
      const colValues=batch.map((c,i)=>{
       const gi=batchStart+i;
       colReq.input(`orig${gi}`,sql.NVarChar(255),c.originalName);
@@ -268,14 +274,6 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
  }
 }
 
-function makeConverter(type:string):(v:unknown)=>unknown{
- if(type==="BIGINT")return v=>v==null||String(v).trim()===""?null:String(v);
- if(type.startsWith("DECIMAL"))return v=>{if(v==null||String(v).trim()==="")return null;const s=String(v).trim();return Number(s.includes(",")?s.replaceAll(".","").replace(",","."):s)};
- if(type==="DATE"||type==="DATETIME2")return v=>{if(v==null||String(v).trim()==="")return null;const s=String(v).trim();try{const iso=normalizeDateLike(s)??s;const date=new Date(s);if(isNaN(date.getTime()))return null;return date}catch{return null}};
- if(type==="TIME")return v=>{if(v==null||String(v).trim()==="")return null;const s=String(v).trim();const p=s.split(":");const h=parseInt(p[0]??"0",10),m=parseInt(p[1]??"0",10),sec=parseFloat(p[2]??"0");if(isNaN(h)||isNaN(m)||h>23)return null;return new Date(1970,0,1,h,m,Math.floor(sec),Math.round((sec%1)*1000))};
- return v=>v==null||String(v).trim()===""?null:String(v);
-}
-
 async function checkHasDeltaCol(pool:sql.ConnectionPool,schema:string,table:string):Promise<boolean>{
  try{
   const r=await pool.request().input("schema",sql.NVarChar,schema).input("table",sql.NVarChar,table).query("SELECT 1 ok FROM sys.columns WHERE object_id=OBJECT_ID(QUOTENAME(@schema)+'.'+QUOTENAME(@table)) AND name='_cw_rh'");
@@ -294,7 +292,6 @@ async function schemaMatchesSilent(pool:sql.ConnectionPool,schema:string,table:s
 }
 
 async function assertCompatible(request:sql.Request,schema:string,table:string,columns:ParsedColumn[]){const result=await request.input("schema",sql.NVarChar,schema).input("table",sql.NVarChar,table).query("SELECT c.name,t.name type_name,c.max_length,c.precision,c.scale FROM sys.columns c JOIN sys.types t ON c.user_type_id=t.user_type_id WHERE c.object_id=OBJECT_ID(QUOTENAME(@schema)+'.'+QUOTENAME(@table)) ORDER BY c.column_id");const actual=result.recordset.map(r=>String(r.name)).filter((n:string)=>n!=="_cw_rh");const expected=columns.map(c=>c.sqlName);if(JSON.stringify(actual)!==JSON.stringify(expected))throw new Error(`Schema incompatível. Esperado: ${expected.join(", ")}; atual: ${actual.join(", ")}`)}
-function toSqlType(type:string){if(type==="BIGINT")return sql.BigInt;if(type==="DATE")return sql.Date;if(type==="DATETIME2")return sql.DateTime2;if(type==="TIME")return sql.Time;if(type.startsWith("DECIMAL"))return sql.Decimal(18,4);const m=type.match(/NVARCHAR\((\d+)\)/);return m?sql.NVarChar(Number(m[1])):sql.NVarChar(sql.MAX)}
 export function convert(v:unknown,type:string){
  if(v==null||String(v).trim()==="")return null;
  if(type==="BIGINT")return String(v);

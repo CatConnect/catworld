@@ -1,7 +1,9 @@
 import { env } from "@/server/env";
 import { existsSync, unlinkSync } from "node:fs";
+import { copyFile as fsCopy, mkdir } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { writeLocal, downloadLocal } from "./local";
-import { writeBlob, downloadBlob, deleteBlob } from "./blob";
+import { writeBlob, downloadBlob, deleteBlob, copyBlob } from "./blob";
 
 function usesBlob() {
   return !!env().CATWORLD_AZURE_BLOB_CONNECTION_STRING;
@@ -29,4 +31,14 @@ export async function deleteFile(blobName: string) {
 
 export async function uploadTarget(uploadId: string) {
   return { url: `/api/v1/uploads/${uploadId}`, expiresAt: new Date(Date.now() + 15 * 60_000) };
+}
+
+export async function copyFile(sourceBlobName: string, destBlobName: string) {
+  if (usesBlob()) return copyBlob(sourceBlobName, destBlobName);
+  const { resolve } = await import("node:path");
+  const { env: getEnv } = await import("@/server/env");
+  const srcPath = resolve(getEnv().CATWORLD_UPLOAD_DIR, sourceBlobName);
+  const dstPath = resolve(getEnv().CATWORLD_UPLOAD_DIR, destBlobName);
+  await mkdir(dirname(dstPath), { recursive: true });
+  await fsCopy(srcPath, dstPath);
 }

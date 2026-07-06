@@ -1,4 +1,4 @@
-import { createWriteStream } from "node:fs";import { mkdtemp,rm } from "node:fs/promises";import { tmpdir } from "node:os";import { basename,extname,join } from "node:path";import { pipeline } from "node:stream/promises";import { spawn } from "node:child_process";import { prisma } from "@/server/db";import { downloadFile, deleteFile } from "@/server/storage";import { env } from "@/server/env";import { previewFile,type FilePreview } from "@/server/uploads/parser";import { importUpload } from "@/server/uploads/importer";
+import { createWriteStream } from "node:fs";import { mkdtemp,rm } from "node:fs/promises";import { tmpdir } from "node:os";import { basename,extname,join } from "node:path";import { pipeline } from "node:stream/promises";import { spawn } from "node:child_process";import { prisma } from "@/server/db";import { downloadFile, deleteFile, copyFile } from "@/server/storage";import { env } from "@/server/env";import { previewFile,type FilePreview } from "@/server/uploads/parser";import { importUpload } from "@/server/uploads/importer";
 
 type Claimed={id:string;type:string;upload_id:string|null;attempts:number;max_attempts:number};let stopping=false;process.on("SIGTERM",()=>stopping=true);process.on("SIGINT",()=>stopping=true);
 async function claim(lockedBy:string):Promise<Claimed|null>{const rows=await prisma.$queryRawUnsafe<Claimed[]>(`DECLARE @job TABLE(id uniqueidentifier,type varchar(50),upload_id uniqueidentifier,attempts int,max_attempts int); UPDATE TOP(1) dbo.cw_jobs WITH (UPDLOCK,READPAST,ROWLOCK) SET status='RUNNING',locked_at=SYSUTCDATETIME(),heartbeat_at=SYSUTCDATETIME(),locked_by=@P1,attempts=attempts+1 OUTPUT inserted.id,inserted.type,inserted.upload_id,inserted.attempts,inserted.max_attempts INTO @job WHERE status='QUEUED' AND available_at<=SYSUTCDATETIME(); SELECT * FROM @job`,lockedBy);return rows[0]??null}
@@ -9,7 +9,7 @@ async function work(job:Claimed){
  if(!job.upload_id)throw new Error("Job sem upload");
  const upload=await prisma.upload.findUniqueOrThrow({where:{id:job.upload_id}});
  const heartbeat=setInterval(()=>void prisma.job.update({where:{id:job.id},data:{heartbeatAt:new Date()}}),15000);
- try{
+  try{
   if(job.type==="PREVIEW_UPLOAD"){
    // Preview always needs a local file (detectEncoding/detectSeparator require seekable reads)
    const file=await localFile(upload);
@@ -17,6 +17,9 @@ async function work(job:Claimed){
     await prisma.upload.update({where:{id:upload.id},data:{status:"PREVIEWING",progress:10}});
     const preview=await previewFile(file.path);
     await prisma.upload.update({where:{id:upload.id},data:{status:"AWAITING_CONFIRMATION",progress:20,previewJson:JSON.stringify(preview),rowCount:BigInt(preview.rowCount)}});
+    // Copy original blob to tmp/ prefix that survives Azure Lifecycle Management (~10min TTL)
+    const ext=extname(upload.originalFilename).toLowerCase();
+    await copyFile(upload.blobName,`tmp/originals/${upload.id}${ext}`).catch(()=>{});
    }finally{await rm(file.dir,{recursive:true,force:true})}
   }else if(job.type==="IMPORT_UPLOAD"){
    await prisma.upload.update({where:{id:upload.id},data:{status:"IMPORTING",progress:35}});
@@ -24,7 +27,12 @@ async function work(job:Claimed){
    const useStream=!!env().CATWORLD_AZURE_BLOB_CONNECTION_STRING&&ext!==".xls";
    if(useStream){
     // P0: Stream directly from blob — no disk download, no re-read
-    const stream=await downloadFile(upload.blobName);
+    let stream;
+    try{stream=await downloadFile(upload.blobName)}catch{
+     // Original blob may have been deleted by Azure Lifecycle Management (~10min TTL)
+     // Fall back to copy made during preview at tmp/originals/
+     stream=await downloadFile(`tmp/originals/${upload.id}${ext}`);
+    }
     await importUpload(upload.id,stream);
    }else{
     // Local storage or XLS (needs LibreOffice conversion): download to disk first
@@ -32,9 +40,9 @@ async function work(job:Claimed){
     try{await importUpload(upload.id,file.path)}
     finally{await rm(file.dir,{recursive:true,force:true})}
    }
-   await deleteFile(upload.blobName).catch(()=>{});
   }else throw new Error(`Tipo de job desconhecido: ${job.type}`);
   await prisma.job.update({where:{id:job.id},data:{status:"COMPLETED",lockedAt:null,lockedBy:null,heartbeatAt:null}});
+  await deleteFile(upload.blobName).catch(()=>{});
  }finally{clearInterval(heartbeat)}
 }
 

@@ -49,6 +49,13 @@ export async function deleteBlob(blobName: string) {
   await containerClient().deleteBlob(blobName, { deleteSnapshots: "include" }).catch(() => undefined);
 }
 
+export async function copyBlob(sourceBlobName: string, destBlobName: string) {
+  const container = containerClient();
+  const sourceClient = container.getBlockBlobClient(sourceBlobName);
+  const destClient = container.getBlockBlobClient(destBlobName);
+  await destClient.syncCopyFromURL(sourceClient.url);
+}
+
 export async function ensureContainer() {
   await containerClient().createIfNotExists();
 }
