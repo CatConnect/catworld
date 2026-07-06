@@ -8,6 +8,7 @@ import sql from "mssql";
 import { BlobServiceClient, BlobSASPermissions, StorageSharedKeyCredential, generateBlobSASQueryParameters } from "@azure/storage-blob";
 import { PassThrough } from "node:stream";
 import { previewFile, rowsFromFile } from "../src/server/uploads/parser";
+import { normalizeDateLike } from "../src/server/uploads/date-normalize";
 
 const envPath = resolve(".", ".env");
 if (existsSync(envPath)) {
@@ -31,8 +32,8 @@ function parseSqlUrl(url: string): sql.config {
 function makeCleanConverter(type: string): (v: unknown) => string {
   if (type === "BIGINT") return v => (v == null || String(v).trim() === "") ? "" : String(v).trim();
   if (type.startsWith("DECIMAL")) return v => { if (v == null || String(v).trim() === "") return ""; const s = String(v).trim(); const n = Number(s.includes(",") ? s.replaceAll(".", "").replace(",", ".") : s); return isNaN(n) ? "" : n.toFixed(4); };
-  if (type === "DATE") return v => { if (v == null || String(v).trim() === "") return ""; const s = String(v).trim(), br = s.match(/^(\d{2})\/(\d{2})\/(\d{4})/); return br ? `${br[3]}-${br[2]}-${br[1]}` : s.slice(0, 10); };
-  if (type === "DATETIME2") return v => { if (v == null || String(v).trim() === "") return ""; const s = String(v).trim(), br = s.match(/^(\d{2})\/(\d{2})\/(\d{4})(.*)/); const iso = br ? `${br[3]}-${br[2]}-${br[1]}${br[4]}` : s; return new Date(iso).toISOString().replace("T", " ").replace("Z", ""); };
+  if (type === "DATE") return v => { if (v == null || String(v).trim() === "") return ""; const s = String(v).trim(); return normalizeDateLike(s)?.slice(0, 10) ?? ""; };
+  if (type === "DATETIME2") return v => { if (v == null || String(v).trim() === "") return ""; const s = String(v).trim(); const iso = normalizeDateLike(s) ?? s; return new Date(iso).toISOString().replace("T", " ").replace("Z", ""); };
   if (type === "TIME") return v => (v == null || String(v).trim() === "") ? "" : String(v).trim();
   return v => { if (v == null || String(v).trim() === "") return '""'; return '"' + String(v).replace(/"/g, '""') + '"'; };
 }

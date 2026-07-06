@@ -100,4 +100,21 @@ describe("inferência de schema escaneia o arquivo inteiro, não só a amostra",
     const preview = await previewFile(path);
     expect(preview.columns[0].sqlType).toBe("DATE");
   });
+  it("infere DATE para MM/DD/YYYY quando o dia fica no segundo campo", async () => {
+    const path = await csv(`dt\n12/31/2024\n01/15/2025\n`);
+    const preview = await previewFile(path);
+    expect(preview.columns[0].sqlType).toBe("DATE");
+  });
+
+  it("nao infere DATE para datas impossiveis", async () => {
+    const path = await csv(`dt\n31/31/2024\n31/31/2025\n`);
+    const preview = await previewFile(path);
+    expect(preview.columns[0].sqlType).toBe("NVARCHAR(50)");
+  });
+
+  it("nao infere DATETIME2 para texto que apenas comeca com data", async () => {
+    const path = await csv(`status\n2026-04-10 17:20:56.3870 - USER - Aprovado\n2026-01-21 09:53:30.1730 - USER - Nao Concluido\n`);
+    const preview = await previewFile(path);
+    expect(preview.columns[0].sqlType).toMatch(/^NVARCHAR\(\d+\)$/);
+  });
 });

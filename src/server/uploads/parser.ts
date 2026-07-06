@@ -4,6 +4,7 @@ import { parse } from "csv-parse";
 import iconv from "iconv-lite";
 import ExcelJS from "exceljs";
 import { sqlIdentifier } from "@/server/security/naming";
+import { hasDateTimePart, isDateLike } from "./date-normalize";
 
 export type ParsedColumn={originalName:string;sqlName:string;sqlType:string;nullable:boolean};
 export type FilePreview={columns:ParsedColumn[];rows:Record<string,unknown>[];rowCount:number;encoding:string;separator:string|null;sheetNames:string[]};
@@ -74,8 +75,6 @@ function newStats():ColumnStats{return{maxLen:0,hasNull:false,allInt:true,allDec
 const RE_INT=/^-?\d+$/;
 const RE_INT_LEADING_ZERO=/^0\d+/;
 const RE_DECIMAL=/^-?\d{1,3}(?:[.,]\d{3})*[,]\d+$|^-?\d+[.,]\d+$/;
-const RE_DATE=/^\d{2}\/\d{2}\/\d{4}$|^\d{4}-\d{2}-\d{2}$/;
-const RE_DATETIME=/^\d{2}\/\d{2}\/\d{4}[T ]\d{2}:\d{2}(:\d{2})?$|^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/;
 const RE_TIME=/^\d{1,2}:\d{2}(:\d{2})?$/;
 function isInt(t:string){return RE_INT.test(t)&&!RE_INT_LEADING_ZERO.test(t)}
 function updateStats(s:ColumnStats,raw:unknown){
@@ -86,9 +85,9 @@ function updateStats(s:ColumnStats,raw:unknown){
   if(s.allInt&&!isInt(trimmed))s.allInt=false;
   // inteiros são decimais válidos — só invalida se não for nem decimal nem inteiro
   if(s.allDecimal&&!RE_DECIMAL.test(trimmed)&&!isInt(trimmed))s.allDecimal=false;
-  const isDate=RE_DATE.test(trimmed),isDatetime=RE_DATETIME.test(trimmed);
-  if(s.allDateLike&&!isDate&&!isDatetime)s.allDateLike=false;
-  if(isDatetime)s.hasTimePart=true;
+  const dateLike=isDateLike(trimmed),dateTime=hasDateTimePart(trimmed);
+  if(s.allDateLike&&!dateLike)s.allDateLike=false;
+  if(dateTime)s.hasTimePart=true;
   if(s.allTime&&!RE_TIME.test(trimmed))s.allTime=false;
 }
 function textSqlType(maxLen:number){

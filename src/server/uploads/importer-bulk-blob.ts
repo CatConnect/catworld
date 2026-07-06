@@ -10,6 +10,7 @@ import { sqlPool } from "@/server/azure/sql";
 import { quoteIdentifier } from "@/server/security/naming";
 import { rowsFromFile, type ParsedColumn, type RowsFromFileOpts } from "./parser";
 import { env } from "@/server/env";
+import { normalizeDateLike } from "./date-normalize";
 
 export type BulkBlobResult = {
   total: number;
@@ -41,16 +42,14 @@ function makeCleanConverter(type: string): (v: unknown) => string {
     return v => {
       if (v == null || String(v).trim() === "") return "";
       const s = String(v).trim();
-      const br = s.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
-      return br ? `${br[3]}-${br[2]}-${br[1]}` : s.slice(0, 10);
+      return normalizeDateLike(s)?.slice(0, 10) ?? "";
     };
   }
   if (type === "DATETIME2") {
     return v => {
       if (v == null || String(v).trim() === "") return "";
       const s = String(v).trim();
-      const br = s.match(/^(\d{2})\/(\d{2})\/(\d{4})(.*)/);
-      const iso = br ? `${br[3]}-${br[2]}-${br[1]}${br[4]}` : s;
+      const iso = normalizeDateLike(s) ?? s;
       return new Date(iso).toISOString().replace("T", " ").replace("Z", "");
     };
   }
@@ -73,7 +72,7 @@ export async function bulkInsertFromBlob(
   knownRowCount = 0
 ): Promise<BulkBlobResult> {
   const { connStr, account, key, container } = blobEnv();
-  const cleanBlobName = `tmp/bulk-${uploadId}.csv`;
+  const cleanBlobName = `tmp/bulk-v2-${uploadId}.csv`;
   const timings: Record<string, number> = {};
   const mark = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
     const started = Date.now();
@@ -146,7 +145,6 @@ export async function bulkInsertFromBlob(
   const tempCred = `CatworldBulkCred_${hash}`;
   const tempDs = `CatworldBulkDS_${hash}`;
   let bulkAttempts = 0;
-  let keepCleanBlobForRetry = false;
 
   try {
     await mark("createScopedCredentialMs", () => pool.request().query(`
@@ -183,7 +181,6 @@ export async function bulkInsertFromBlob(
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (attempt >= 5 || !message.includes('OLE DB provider "BULK"')) {
-          keepCleanBlobForRetry = message.includes('OLE DB provider "BULK"');
           throw error;
         }
         const waitMs = 5_000 * attempt;
@@ -194,7 +191,7 @@ export async function bulkInsertFromBlob(
   } finally {
     await pool.request().query(`IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name='${tempDs}') DROP EXTERNAL DATA SOURCE [${tempDs}]`).catch(() => {});
     await pool.request().query(`IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name='${tempCred}') DROP DATABASE SCOPED CREDENTIAL [${tempCred}]`).catch(() => {});
-    if (!keepCleanBlobForRetry) await blockClient.delete().catch(() => {});
+    await blockClient.delete().catch(() => {});
   }
 
   return { total, timings, cleanBlobName, reusedCleanBlob, bulkAttempts };

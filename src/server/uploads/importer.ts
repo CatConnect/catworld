@@ -6,6 +6,7 @@ import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts } from "./parser";
 import { bulkInsertFromBlob } from "./importer-bulk-blob";
 import { env } from "@/server/env";
+import { normalizeDateLike } from "./date-normalize";
 
 const SMALL_CSV_TDS_THRESHOLD_BYTES = 1 * 1024 * 1024;
 
@@ -219,7 +220,7 @@ export async function importUpload(uploadId:string, source:string|NodeJS.Readabl
 function makeConverter(type:string):(v:unknown)=>unknown{
  if(type==="BIGINT")return v=>v==null||String(v).trim()===""?null:String(v);
  if(type.startsWith("DECIMAL"))return v=>{if(v==null||String(v).trim()==="")return null;const s=String(v).trim();return Number(s.includes(",")?s.replaceAll(".","").replace(",","."):s)};
- if(type==="DATE"||type==="DATETIME2")return v=>{if(v==null||String(v).trim()==="")return null;const s=String(v).trim(),br=s.match(/^(\d{2})\/(\d{2})\/(\d{4})(.*)$/),iso=br?`${br[3]}-${br[2]}-${br[1]}${br[4]}`:s;return new Date(type==="DATE"?iso.slice(0,10)+"T00:00:00Z":iso)};
+ if(type==="DATE"||type==="DATETIME2")return v=>{if(v==null||String(v).trim()==="")return null;const s=String(v).trim(),iso=normalizeDateLike(s)??s;return new Date(type==="DATE"?iso.slice(0,10)+"T00:00:00Z":iso)};
  if(type==="TIME")return v=>{if(v==null||String(v).trim()==="")return null;const s=String(v).trim();const p=s.split(":");const h=parseInt(p[0]??"0",10),m=parseInt(p[1]??"0",10),sec=parseFloat(p[2]??"0");if(isNaN(h)||isNaN(m)||h>23)return null;return new Date(1970,0,1,h,m,Math.floor(sec),Math.round((sec%1)*1000))};
  return v=>v==null||String(v).trim()===""?null:String(v);
 }
@@ -249,8 +250,7 @@ export function convert(v:unknown,type:string){
  if(type.startsWith("DECIMAL")){const s=String(v).trim();return Number(s.includes(",")?s.replaceAll(".","").replace(",","."):s)}
  if(type==="DATE"||type==="DATETIME2"){
   const s=String(v).trim();
-  const br=s.match(/^(\d{2})\/(\d{2})\/(\d{4})(.*)$/);
-  const iso=br?`${br[3]}-${br[2]}-${br[1]}${br[4]}`:s;
+  const iso=normalizeDateLike(s)??s;
   return new Date(type==="DATE"?iso.slice(0,10)+"T00:00:00Z":iso);
  }
  if(type==="TIME")return String(v).trim();

@@ -21,6 +21,10 @@ describe("convert() não corrompe decimais (regressão)", () => {
     expect(convert("2026-05-04", "DATE")).toEqual(new Date("2026-05-04"));
   });
 
+  it("converte MM/DD/YYYY quando o dia esta no segundo campo", () => {
+    expect(convert("12/31/2024", "DATE")).toEqual(new Date("2024-12-31T00:00:00Z"));
+  });
+
   it("mantém BIGINT como string", () => {
     expect(convert(123, "BIGINT")).toBe("123");
   });
