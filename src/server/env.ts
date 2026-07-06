@@ -6,6 +6,7 @@ const schema = z.object({
   AUTH_SECRET: z.string().min(32),
   CATWORLD_UPLOAD_DIR: z.string().default("./var/uploads"),
   CATWORLD_WORKER_ID: z.string().default("worker-1"),
+  CATWORLD_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(20).default(1),
   CATWORLD_JOB_POLL_MS: z.coerce.number().int().positive().default(2000),
   CATWORLD_UPLOAD_MAX_BYTES: z.coerce.number().int().positive().default(500 * 1024 * 1024),
   CATWORLD_AZURE_BLOB_CONNECTION_STRING: z.string().optional(),
