@@ -108,23 +108,6 @@ export async function bulkInsertFromBlob(
 
     passThrough.end();
     await uploadPromise;
-
-    const pollStarted = Date.now();
-    let blobVerified = false;
-    while (Date.now() - pollStarted < 30_000) {
-      const exists = await blockClient.exists();
-      if (exists) {
-        const props = await blockClient.getProperties();
-        if (props.contentLength && props.contentLength > 0) {
-          blobVerified = true;
-          break;
-        }
-      }
-      await new Promise(r => setTimeout(r, 1000));
-    }
-    if (!blobVerified) {
-      throw new Error(`Clean blob inaccessible or empty after upload (polled 30s)`);
-    }
   });
 
   const credential = new StorageSharedKeyCredential(account, key);
@@ -135,18 +118,20 @@ export async function bulkInsertFromBlob(
   const tempDs = `CatworldBulkDS_${hash}`;
   let bulkAttempts = 0;
 
-  // Single atomic batch: drop DS first (depends on credential), then credential, then recreate both.
-  // This prevents "credential already exists" when a previous cleanup left the DS referencing the credential.
+  // CREATE credential/DS on first attempt; ALTER credential on retry (DS already exists).
+  // Avoids DROP+CREATE DDL on the critical path — 2 DDL ops on first attempt vs 1 ALTER on retry.
+  // Cleanup (DROP) still happens in the finally block after all attempts complete.
   async function ensureCredentialAndDataSource(sas: string) {
     await pool.request().query(`
-      IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name='${tempDs}')
-        DROP EXTERNAL DATA SOURCE [${tempDs}];
-      IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name='${tempCred}')
-        DROP DATABASE SCOPED CREDENTIAL [${tempCred}];
-      CREATE DATABASE SCOPED CREDENTIAL [${tempCred}]
-        WITH IDENTITY = 'SHARED ACCESS SIGNATURE', SECRET = '${sas}';
-      CREATE EXTERNAL DATA SOURCE [${tempDs}]
-        WITH (TYPE = BLOB_STORAGE, LOCATION = 'https://${account}.blob.core.windows.net/${container}', CREDENTIAL = [${tempCred}])
+      IF NOT EXISTS (SELECT 1 FROM sys.database_scoped_credentials WHERE name='${tempCred}')
+        CREATE DATABASE SCOPED CREDENTIAL [${tempCred}]
+          WITH IDENTITY = 'SHARED ACCESS SIGNATURE', SECRET = '${sas}';
+      ELSE
+        ALTER DATABASE SCOPED CREDENTIAL [${tempCred}]
+          WITH IDENTITY = 'SHARED ACCESS SIGNATURE', SECRET = '${sas}';
+      IF NOT EXISTS (SELECT 1 FROM sys.external_data_sources WHERE name='${tempDs}')
+        CREATE EXTERNAL DATA SOURCE [${tempDs}]
+          WITH (TYPE = BLOB_STORAGE, LOCATION = 'https://${account}.blob.core.windows.net/${container}', CREDENTIAL = [${tempCred}]);
     `);
   }
 

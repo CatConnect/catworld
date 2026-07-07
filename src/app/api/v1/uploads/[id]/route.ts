@@ -50,6 +50,17 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
     const action = r.nextUrl.searchParams.get("action");
 
     if (action === "uploaded") {
+      // If the client already computed the preview (e.g. via DuckDB-WASM), skip the PREVIEW_UPLOAD
+      // job and go straight to import. Requires previewJson + mappingJson + datasetId on the upload.
+      const upload = await prisma.upload.findUniqueOrThrow({
+        where: { id },
+        select: { previewJson: true, mappingJson: true, datasetId: true },
+      });
+      if (upload.previewJson && upload.mappingJson && upload.datasetId) {
+        const { queueImportUploadAuto } = await import("@/server/uploads/actions");
+        const mapping = JSON.parse(upload.mappingJson) as { originalName: string; sqlName: string; sqlType: string; nullable: boolean }[];
+        return ok(await queueImportUploadAuto(id, mapping), undefined, 202);
+      }
       return ok(await queuePreviewUpload(id), undefined, 202);
     }
 

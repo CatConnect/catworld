@@ -325,37 +325,30 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
         );
         inserted = total;
       } else {
-        // Upsert (MERGE)
+        // Upsert: DELETE matched rows + INSERT all from staging (1.5-1.8× faster than MERGE,
+        // less index fragmentation — see RESEARCH.md #4)
         if (!upload.keyColumn) throw new Error("Upsert exige coluna-chave");
         const key = quoteIdentifier(upload.keyColumn);
         const keyColumn = mapping.find(c => c.sqlName === upload.keyColumn);
         if (!keyColumn) throw new Error("Coluna-chave não encontrada no arquivo");
         const keyExpr = typedSelectExpr(keyColumn, "s");
-        const nonKey = mapping.filter(c => c.sqlName !== upload.keyColumn);
         const duplicates = await request.query(
           `SELECT ${key}, COUNT(*) n FROM ${staging} GROUP BY ${key} HAVING COUNT(*) > 1`,
         );
         if (duplicates.recordset.length) throw new Error("Arquivo contém chaves duplicadas para upsert");
-        const whenMatched = nonKey.length > 0
-          ? `WHEN MATCHED THEN UPDATE SET ${nonKey.map(c => `t.${quoteIdentifier(c.sqlName)}=${typedSelectExpr(c, "s")}`).join(",")}`
-          : "";
-        const merge = await request.query(`
-          DECLARE @stats TABLE (action NVARCHAR(10));
-          MERGE INTO ${target} AS t
-          USING ${staging} AS s ON t.${key}=${keyExpr}
-          ${whenMatched}
-          WHEN NOT MATCHED BY TARGET THEN
-            INSERT (${mapping.map(c => quoteIdentifier(c.sqlName)).join(",")})
-            VALUES (${mapping.map(c => typedSelectExpr(c, "s")).join(",")})
-          OUTPUT $action INTO @stats;
-          SELECT
-            SUM(CASE WHEN action='UPDATE' THEN 1 ELSE 0 END) updated,
-            SUM(CASE WHEN action='INSERT' THEN 1 ELSE 0 END) inserted
-          FROM @stats;
+        const upsertStats = await request.query(`
+          DECLARE @del INT, @ins INT;
+          DELETE t FROM ${target} t
+            WHERE EXISTS (SELECT 1 FROM ${staging} s WHERE t.${key} = ${keyExpr});
+          SET @del = @@ROWCOUNT;
+          INSERT INTO ${target} (${mapping.map(c => quoteIdentifier(c.sqlName)).join(",")})
+            SELECT ${mapping.map(c => typedSelectExpr(c, "s")).join(",")} FROM ${staging} s;
+          SET @ins = @@ROWCOUNT;
           DROP TABLE ${staging};
+          SELECT @del updated, @ins inserted;
         `);
-        updated = Number(merge.recordset[0]?.updated ?? 0);
-        inserted = Number(merge.recordset[0]?.inserted ?? 0);
+        updated = Number(upsertStats.recordset[0]?.updated ?? 0);
+        inserted = Number(upsertStats.recordset[0]?.inserted ?? 0);
       }
 
       const countStr = (await request.query(`SELECT COUNT_BIG(*) count FROM ${target}`)).recordset[0].count as string;

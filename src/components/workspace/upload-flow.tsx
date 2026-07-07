@@ -1,6 +1,7 @@
 "use client";
 import { useRef, useState, useEffect } from "react";
 import { Check, Loader2, UploadCloud, XCircle, AlertTriangle } from "lucide-react";
+import { previewFileInBrowser, type FilePreviewResult } from "@/lib/duckdb-preview";
 
 type FileJob = {
   id: string;
@@ -76,16 +77,45 @@ export function UploadFlow({
         setJobs((prev) => prev.map((j) => (j.id === job.id ? { ...j, ...patch } : j)));
 
       try {
+        // 0) Try browser-side preview with DuckDB-WASM (CSV only, XLSX falls back)
+        update({ status: "previewing", statusLabel: "Analisando..." });
+        let browserPreview: FilePreviewResult | null = null;
+        try {
+          browserPreview = await previewFileInBrowser(job.file);
+        } catch {
+          // Non-fatal: fall back to server-side preview
+        }
+
         update({ status: "uploading", statusLabel: "Enviando..." });
 
-        // 1) Create upload entry
+        // 1) Create upload entry — include preview data if computed in browser
+        const createBody: Record<string, unknown> = {
+          filename: job.file.name,
+          sizeBytes: job.file.size,
+          datasetId: dId,
+          mode: "replace",
+        };
+        if (tt?.id) createBody.tableId = tt.id;
+        if (browserPreview) {
+          createBody.previewJson = JSON.stringify(browserPreview);
+          createBody.mappingJson = JSON.stringify(browserPreview.columns);
+          createBody.rowCount = browserPreview.rowCount;
+        }
+
         const first = await fetch("/api/v1/uploads", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ filename: job.file.name, sizeBytes: job.file.size }),
+          body: JSON.stringify(createBody),
         });
         const b = await first.json();
         if (!first.ok) throw new Error(b.error?.message ?? "Falha ao criar upload");
+
+        if (b.data.skip) {
+          update({ status: "completed", statusLabel: "Concluído (sem alterações)" });
+          oc();
+          return;
+        }
+
         const uploadId: string = b.data.upload.id;
         update({ uploadId });
 
@@ -97,31 +127,37 @@ export function UploadFlow({
         });
         if (!r.ok) throw new Error("Falha ao enviar arquivo para storage");
 
-        // 3) Notify uploaded
+        // 3) Notify uploaded — if browser preview was set, server skips PREVIEW_UPLOAD
+        //    and queues IMPORT_UPLOAD directly (no poll for preview needed)
         await fetch(`/api/v1/uploads/${uploadId}?action=uploaded`, { method: "POST" });
 
-        // 4) Poll for preview
-        update({ status: "previewing", statusLabel: "Analisando..." });
-        const preview = await pollForPreview(uploadId, (label) => update({ statusLabel: label }));
-
-        // 5) Auto-confirm
         update({ status: "importing", statusLabel: "Importando..." });
-        const confirmRes = await fetch(`/api/v1/uploads/${uploadId}?action=confirm`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            datasetId: dId,
-            tableId: tt?.id ?? null,
-            mode: "replace",
-            keyColumn: null,
-            mapping: preview.columns,
-          }),
-        });
-        const confirmBody = await confirmRes.json();
-        if (!confirmRes.ok) throw new Error(confirmBody.error?.message ?? "Falha ao confirmar");
 
-        // 6) Poll for completion
-        await pollForCompletion(uploadId, (label) => update({ statusLabel: label }));
+        if (browserPreview) {
+          // Fast path: preview already done, skip straight to polling for completion
+          await pollForCompletion(uploadId, (label) => update({ statusLabel: label }));
+        } else {
+          // Slow path: wait for server-side preview, then confirm
+          update({ status: "previewing", statusLabel: "Analisando..." });
+          const preview = await pollForPreview(uploadId, (label) => update({ statusLabel: label }));
+
+          update({ status: "importing", statusLabel: "Importando..." });
+          const confirmRes = await fetch(`/api/v1/uploads/${uploadId}?action=confirm`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              datasetId: dId,
+              tableId: tt?.id ?? null,
+              mode: "replace",
+              keyColumn: null,
+              mapping: preview.columns,
+            }),
+          });
+          const confirmBody = await confirmRes.json();
+          if (!confirmRes.ok) throw new Error(confirmBody.error?.message ?? "Falha ao confirmar");
+
+          await pollForCompletion(uploadId, (label) => update({ statusLabel: label }));
+        }
 
         update({ status: "completed", statusLabel: "Concluído" });
         oc();

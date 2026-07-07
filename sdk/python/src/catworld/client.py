@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import gzip as _gzip
 import hashlib as _hashlib
-import io as _io
 import json as _json
 import logging
 import time
+import zlib as _zlib
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 
@@ -105,8 +104,8 @@ class CatworldClient:
             file.name, _fmt_bytes(size), dataset_id, mode,
         )
 
-        raw_bytes = file.read_bytes()
-        file_hash = _hashlib.md5(raw_bytes).hexdigest()
+        # Compute MD5 hash streaming (no full-file RAM peak)
+        file_hash = self._stream_md5(file)
         logger.debug("Hash MD5: %s", file_hash)
 
         body: dict = {"filename": file.name, "sizeBytes": size, "fileHash": file_hash, "datasetId": dataset_id, "mode": mode}
@@ -123,17 +122,14 @@ class CatworldClient:
         upload_id = created["upload"]["id"]
 
         logger.info("Comprimindo e enviando arquivo para storage...")
-        compressed = _gzip.compress(raw_bytes, compresslevel=1)
-        logger.info(
-            "Compressão: %s → %s (%.0f%%)",
-            _fmt_bytes(len(raw_bytes)), _fmt_bytes(len(compressed)),
-            len(compressed) / max(len(raw_bytes), 1) * 100,
-        )
 
+        # Stream-compress and upload without loading full file into RAM.
+        # Each retry creates a fresh generator from the file. httpx sends via
+        # chunked transfer encoding, which Azure Blob Storage supports.
         for attempt in range(3):
             response = self._client.put(
                 created["sas"]["url"],
-                content=_io.BytesIO(compressed),
+                content=self._gzip_stream(file),
                 headers={"content-type": "application/octet-stream", "content-encoding": "gzip"},
                 timeout=None,
             )
@@ -149,6 +145,27 @@ class CatworldClient:
         result = self._wait_upload(upload_id, "COMPLETED", poll_interval)
         logger.info("Upload concluído: %s linha(s) importada(s)", result.get("insertedCount", "?"))
         return result
+
+    @staticmethod
+    def _stream_md5(file: Path, chunk_size: int = 1024 * 1024) -> str:
+        hasher = _hashlib.md5()
+        with file.open("rb") as f:
+            while chunk := f.read(chunk_size):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    @staticmethod
+    def _gzip_stream(file: Path, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
+        """Yield gzip-compressed chunks without loading the full file into RAM."""
+        compressor = _zlib.compressobj(level=1, wbits=31)  # wbits=31 → gzip format
+        with file.open("rb") as f:
+            while chunk := f.read(chunk_size):
+                compressed = compressor.compress(chunk)
+                if compressed:
+                    yield compressed
+        tail = compressor.flush()
+        if tail:
+            yield tail
 
     def _wait_upload(self, upload_id: str, target: str, interval: float):
         last_status = None
