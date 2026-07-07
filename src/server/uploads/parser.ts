@@ -72,8 +72,20 @@ async function previewXlsx(path:string){
 }
 
 const cellValue=(value:ExcelJS.CellValue)=>value==null?"":value instanceof Date?value.toISOString():typeof value==="object"?String((value as {text?:string;result?:unknown}).text??(value as {result?:unknown}).result??""):String(value);
-type ColumnStats={maxLen:number;hasNull:boolean;allInt:boolean;allDecimal:boolean;allDateLike:boolean;hasTimePart:boolean;allTime:boolean;sampleCount:number};
-function newStats():ColumnStats{return{maxLen:0,hasNull:false,allInt:true,allDecimal:true,allDateLike:true,hasTimePart:false,allTime:true,sampleCount:0}}
+function excelSerialToIso(raw:string,type:string){
+ const n=Number(raw);
+ if(!Number.isFinite(n)||n<=0||n>100000)return raw;
+ const ms=Math.round((n-25569)*86400*1000);
+ const date=new Date(ms);
+ if(Number.isNaN(date.getTime()))return raw;
+ return type==="DATE"?date.toISOString().slice(0,10):date.toISOString();
+}
+function normalizeCellForColumn(value:string,column:ParsedColumn){
+ if((column.sqlType==="DATE"||column.sqlType==="DATETIME2")&&/^\d+(\.\d+)?$/.test(value.trim()))return excelSerialToIso(value.trim(),column.sqlType);
+ return value;
+}
+type ColumnStats={maxLen:number;hasNull:boolean;allInt:boolean;allDecimal:boolean;allDateLike:boolean;hasTimePart:boolean;allTime:boolean;sampleCount:number;looksIdentifier:boolean};
+function newStats():ColumnStats{return{maxLen:0,hasNull:false,allInt:true,allDecimal:true,allDateLike:true,hasTimePart:false,allTime:true,sampleCount:0,looksIdentifier:false}}
 const RE_INT=/^-?\d+$/;
 const RE_INT_LEADING_ZERO=/^0\d+/;
 const RE_DECIMAL=/^-?\d{1,3}(?:[.,]\d{3})*[,]\d+$|^-?\d+[.,]\d+$/;
@@ -84,6 +96,7 @@ function updateStats(s:ColumnStats,raw:unknown){
   if(trimmed===""){s.hasNull=true;return}
   s.sampleCount++;
   if(v.length>s.maxLen)s.maxLen=v.length;
+  if(RE_INT.test(trimmed)&&RE_INT_LEADING_ZERO.test(trimmed))s.looksIdentifier=true;
   if(s.allInt&&!isInt(trimmed))s.allInt=false;
   // inteiros são decimais válidos — só invalida se não for nem decimal nem inteiro
   if(s.allDecimal&&!RE_DECIMAL.test(trimmed)&&!isInt(trimmed))s.allDecimal=false;
@@ -92,12 +105,13 @@ function updateStats(s:ColumnStats,raw:unknown){
   if(dateTime)s.hasTimePart=true;
   if(s.allTime&&!RE_TIME.test(trimmed))s.allTime=false;
 }
-function textSqlType(maxLen:number){
+function textSqlType(){
  return "NVARCHAR(MAX)";
 }
 // P5: All columns are always nullable — BULK INSERT treats empty CSV fields as NULL.
 //     Even columns that appear NOT NULL in sample rows can have empty/invalid values later in the file.
-function columnsFromStats(headers:string[],stats:ColumnStats[]):ParsedColumn[]{const used=new Map<string,number>();return headers.map((header,index)=>{let name=sqlIdentifier(header||`col_${index+1}`);const n=(used.get(name)??0)+1;used.set(name,n);if(n>1)name=`${name}_${n}`;const s=stats[index]??newStats();const sqlType=s.sampleCount===0?"NVARCHAR(255)":s.allInt?"BIGINT":s.allDecimal?"DECIMAL(18,4)":s.allDateLike&&s.hasTimePart?"DATETIME2":s.allDateLike?"DATE":s.allTime?"TIME":textSqlType(s.maxLen);return{originalName:header,sqlName:name,sqlType,nullable:true}})}
+function headerLooksIdentifier(header:string){return /(^|[_\s-])(cpf|cnpj|cep|telefone|phone|celular|whats|codigo|cod|sku|id|documento|doc)([_\s-]|$)/i.test(header)}
+function columnsFromStats(headers:string[],stats:ColumnStats[]):ParsedColumn[]{const used=new Map<string,number>();return headers.map((header,index)=>{let name=sqlIdentifier(header||`col_${index+1}`);const n=(used.get(name)??0)+1;used.set(name,n);if(n>1)name=`${name}_${n}`;const s=stats[index]??newStats();const forceText=s.looksIdentifier||headerLooksIdentifier(header);const sqlType=s.sampleCount===0?"NVARCHAR(MAX)":forceText?textSqlType():s.allInt?"BIGINT":s.allDecimal?"DECIMAL(18,4)":s.allDateLike&&s.hasTimePart?"DATETIME2":s.allDateLike?"DATE":s.allTime?"TIME":textSqlType();return{originalName:header,sqlName:name,sqlType,nullable:true}})}
 
 function xlsxColumnIndices(headers:string[],columns:ParsedColumn[]){
  let cursor=0;
@@ -138,13 +152,13 @@ export async function* rowsFromFile(
    for(const row of sheet.getRows(1,sheet.rowCount)??[]){
     const values=(Array.isArray(row.values)?row.values.slice(1):[]).map(cellValue);
     if(header){header=false;columnIndices=xlsxColumnIndices(values,columns);continue}
-    yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,values[columnIndices[i]!]??null]));
+    yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,normalizeCellForColumn(values[columnIndices[i]!]??"",c)??null]));
    }
    return;
   }
   // ExcelJS WorkbookReader accepts both file path and Readable stream
   const reader=new ExcelJS.stream.xlsx.WorkbookReader(source as unknown as Stream,{worksheets:"emit",sharedStrings:"cache",styles:"ignore",hyperlinks:"ignore"});
-  for await(const worksheet of reader){let header=true,columnIndices:number[]=columns.map((_,i)=>i);for await(const row of worksheet){const values=(Array.isArray(row.values)?row.values.slice(1):[]).map(cellValue);if(header){header=false;columnIndices=xlsxColumnIndices(values,columns);continue}yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,values[columnIndices[i]!]??null]))}break}
+  for await(const worksheet of reader){let header=true,columnIndices:number[]=columns.map((_,i)=>i);for await(const row of worksheet){const values=(Array.isArray(row.values)?row.values.slice(1):[]).map(cellValue);if(header){header=false;columnIndices=xlsxColumnIndices(values,columns);continue}yield Object.fromEntries(columns.map((c,i)=>[c.sqlName,normalizeCellForColumn(values[columnIndices[i]!]??"",c)??null]))}break}
   return;
  }
 

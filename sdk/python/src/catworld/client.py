@@ -6,9 +6,7 @@ import hashlib as _hashlib
 import io as _io
 import json as _json
 import logging
-import re as _re
 import time
-from datetime import datetime as _datetime, timezone as _tz
 from pathlib import Path
 from typing import Any
 
@@ -37,64 +35,17 @@ def _fmt_bytes(n: int) -> str:
 # ── Phase 2: row hash converters (must match makeCleanConverter in importer-bulk-blob.ts) ──
 
 def _make_hash_converter(sql_type: str):
-    """Python equivalent of makeCleanConverter in importer-bulk-blob.ts."""
-    if sql_type == "BIGINT":
-        return lambda v: "" if (v is None or str(v).strip() == "") else str(v).strip()
+    """Python equivalent of sanitizeCsvField() used before server staging."""
+    _ = sql_type
 
-    if sql_type.startswith("DECIMAL"):
-        def _decimal(v):
-            s = str(v).strip() if v is not None else ""
-            if not s:
-                return ""
-            if "," in s:
-                s = s.replace(".", "").replace(",", ".")
-            try:
-                return f"{float(s):.4f}"
-            except (ValueError, OverflowError):
-                return ""
-        return _decimal
-
-    if sql_type == "DATE":
-        def _date(v):
-            s = str(v).strip() if v is not None else ""
-            if not s:
-                return ""
-            m = _re.match(r"^(\d{2})/(\d{2})/(\d{4})", s)
-            if m:
-                return f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
-            return s[:10]
-        return _date
-
-    if sql_type == "DATETIME2":
-        def _dt2(v):
-            s = str(v).strip() if v is not None else ""
-            if not s:
-                return ""
-            m = _re.match(r"^(\d{2})/(\d{2})/(\d{4})(.*)", s)
-            iso = f"{m.group(3)}-{m.group(2)}-{m.group(1)}{m.group(4)}" if m else s
-            try:
-                dt = _datetime.fromisoformat(iso.strip())
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=_tz.utc)
-                utc = dt.astimezone(_tz.utc)
-                ms = utc.microsecond // 1000
-                return utc.strftime("%Y-%m-%d %H:%M:%S.") + f"{ms:03d}"
-            except (ValueError, OverflowError):
-                return ""
-        return _dt2
-
-    if sql_type == "TIME":
-        return lambda v: "" if (v is None or str(v).strip() == "") else str(v).strip()
-
-    # NVARCHAR (default): same literal sanitizer used by sanitizeCsvField() on the server.
-    def _nvarchar(v):
+    def _literal(v):
         s = str(v) if v is not None else ""
         if s.strip() == "":
             return '""'
         s = s.replace('"', '""')
         s = s.replace("\n", " ").replace("\r", " ").replace("\t", " ").replace("|", " ")
         return '"' + s + '"'
-    return _nvarchar
+    return _literal
 
 
 def _detect_encoding(raw: bytes) -> str:

@@ -124,6 +124,33 @@ describe("inferência de schema escaneia o arquivo inteiro, não só a amostra",
     const preview = await previewFile(path);
     expect(preview.columns[0].sqlType).toBe("DATE");
   });
+  it("rebaixa DATE para NVARCHAR quando existe um valor nao vazio invalido", async () => {
+    const path = await csv(`dt\n2026-01-15\nsem data\n2026-06-20\n`);
+    const preview = await previewFile(path);
+    expect(preview.columns[0].sqlType).toBe("NVARCHAR(MAX)");
+  });
+
+  it("rebaixa DECIMAL para NVARCHAR quando existe texto misturado", async () => {
+    const path = await csv(`valor;desc\n10,50;a\nabc;b\n20,00;c\n`);
+    const preview = await previewFile(path);
+    expect(preview.columns[0].sqlType).toBe("NVARCHAR(MAX)");
+  });
+
+  it("mantem identificadores como texto por header ou zero a esquerda", async () => {
+    const path = await csv(`cnpj;cep;codigo\n12.345.678/0001-90;01310-000;00123\n98.765.432/0001-10;20040-020;00456\n`);
+    const preview = await previewFile(path);
+    expect(preview.columns.map(c => c.sqlType)).toEqual(["NVARCHAR(MAX)", "NVARCHAR(MAX)", "NVARCHAR(MAX)"]);
+  });
+
+  it("vazios nao invalidam tipos fortes", async () => {
+    const path = await csv(`dt;valor;inteiro\n2026-01-15;10,50;1\n;;\n2026-06-20;20,00;2\n`);
+    const preview = await previewFile(path);
+    const type = (name: string) => preview.columns.find((c) => c.sqlName === name)?.sqlType;
+    expect(type("dt")).toBe("DATE");
+    expect(type("valor")).toBe("DECIMAL(18,4)");
+    expect(type("inteiro")).toBe("BIGINT");
+  });
+
   it("infere DATE para MM/DD/YYYY quando o dia fica no segundo campo", async () => {
     const path = await csv(`dt\n12/31/2024\n01/15/2025\n`);
     const preview = await previewFile(path);
@@ -157,4 +184,5 @@ describe("inferência de schema escaneia o arquivo inteiro, não só a amostra",
       { codigo: "AMD120", unidade: "UN", pack: "20" },
     ]);
   });
+
 });

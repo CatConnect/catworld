@@ -21,6 +21,16 @@ function notCapable(reason: string) {
   });
 }
 
+function physicalTypeMatches(row: { type_name: string; precision?: number; scale?: number }, expected: string) {
+  const type = row.type_name.toLowerCase();
+  if (expected === "BIGINT") return type === "bigint";
+  if (expected.startsWith("DECIMAL")) return type === "decimal" && Number(row.precision) === 18 && Number(row.scale) === 4;
+  if (expected === "DATE") return type === "date";
+  if (expected === "DATETIME2") return type === "datetime2";
+  if (expected === "TIME") return type === "time";
+  return type === "nvarchar";
+}
+
 export async function POST(r: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const actor = await resolveActor(r);
@@ -69,14 +79,14 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
       .input("schema", sql.NVarChar, schema)
       .input("table", sql.NVarChar, tableName)
       .query(`
-        SELECT c.name, ty.name type_name, c.is_nullable
+        SELECT c.name, ty.name type_name, c.precision, c.scale, c.is_nullable
         FROM sys.columns c
         JOIN sys.types ty ON c.user_type_id=ty.user_type_id
         WHERE c.object_id=OBJECT_ID(QUOTENAME(@schema)+'.'+QUOTENAME(@table))
         ORDER BY c.column_id
       `);
 
-    const physicalColumns = columnResult.recordset as { name: string; type_name: string; is_nullable: boolean }[];
+    const physicalColumns = columnResult.recordset as { name: string; type_name: string; precision: number; scale: number; is_nullable: boolean }[];
     if (!physicalColumns.length) return notCapable("no-table");
     if (!physicalColumns.some(c => c.name === "_cw_rh")) return notCapable("no-hash-col");
 
@@ -84,7 +94,9 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
     const expected = table.columns.map(c => c.sqlName);
     const actual = dataColumns.map(c => c.name);
     const namesMatch = JSON.stringify(actual) === JSON.stringify(expected);
-    const typesMatch = dataColumns.every(c => c.type_name.toLowerCase() === "nvarchar" && c.is_nullable);
+    const hasTypedColumn = table.columns.some(c => c.sqlType !== "NVARCHAR(MAX)");
+    const typesMatch = dataColumns.every((c, i) => physicalTypeMatches(c, table.columns[i]!.sqlType) && c.is_nullable);
+    if (!hasTypedColumn) return notCapable("schema-mismatch");
     if (!namesMatch || !typesMatch) return notCapable("schema-mismatch");
 
     const countResult = await pool.request().query(`SELECT COUNT_BIG(*) n FROM ${target}`);
@@ -92,8 +104,8 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
     const existingMapping = table.columns.map(c => ({
       originalName: c.originalName,
       sqlName: c.sqlName,
-      sqlType: "NVARCHAR(MAX)",
-      nullable: true,
+      sqlType: c.sqlType,
+      nullable: c.nullable,
     }));
 
     const enc = new TextEncoder();

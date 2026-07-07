@@ -4,11 +4,44 @@ import { prisma } from "@/server/db";
 import { sqlPool } from "@/server/azure/sql";
 import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts } from "./parser";
-import { bulkInsertFromBlob } from "./importer-bulk-blob";
+import { bulkInsertFromBlob, sanitizeCsvField } from "./importer-bulk-blob";
 import { env } from "@/server/env";
 import { normalizeDateLike } from "./date-normalize";
 
 const SMALL_CSV_TDS_THRESHOLD_BYTES = 1 * 1024 * 1024;
+
+function sqlTypeDef(type: string): string {
+  if (type === "BIGINT") return "BIGINT";
+  if (type.startsWith("DECIMAL")) return "DECIMAL(18,4)";
+  if (type === "DATE") return "DATE";
+  if (type === "DATETIME2") return "DATETIME2";
+  if (type === "TIME") return "TIME";
+  return "NVARCHAR(MAX)";
+}
+
+function typedColumnDefs(mapping: ParsedColumn[]): string {
+  return mapping.map(c => `${quoteIdentifier(c.sqlName)} ${sqlTypeDef(c.sqlType)} NULL`).join(",");
+}
+
+function cleanedRef(column: ParsedColumn, alias: string): string {
+  return `NULLIF(LTRIM(RTRIM(${alias}.${quoteIdentifier(column.sqlName)})),'')`;
+}
+
+function typedSelectExpr(column: ParsedColumn, alias: string): string {
+  const value = cleanedRef(column, alias);
+  if (column.sqlType === "BIGINT") return `TRY_CONVERT(BIGINT,${value})`;
+  if (column.sqlType.startsWith("DECIMAL")) {
+    return `TRY_CONVERT(DECIMAL(18,4),CASE WHEN ${value} LIKE '%,%' THEN REPLACE(REPLACE(${value},'.',''),',','.') ELSE ${value} END)`;
+  }
+  if (column.sqlType === "DATE") {
+    return `COALESCE(TRY_CONVERT(DATE,${value},23),TRY_CONVERT(DATE,${value},126),TRY_CONVERT(DATE,${value},103),TRY_CONVERT(DATE,${value},101))`;
+  }
+  if (column.sqlType === "DATETIME2") {
+    return `COALESCE(TRY_CONVERT(DATETIME2,${value},126),TRY_CONVERT(DATETIME2,${value},120),TRY_CONVERT(DATETIME2,${value},103),TRY_CONVERT(DATETIME2,${value},101))`;
+  }
+  if (column.sqlType === "TIME") return `TRY_CONVERT(TIME,${value})`;
+  return `${alias}.${quoteIdentifier(column.sqlName)}`;
+}
 
 // ─── TDS bulk copy ────────────────────────────────────────────────────────────
 // Used as the primary path for small CSVs/XLS and as automatic fallback when
@@ -39,7 +72,7 @@ async function tdsBulkCopy(
     const { createHash: ch } = await import("node:crypto");
     for (const row of batch) {
       const vals = mapping.map(c => stringify(row[c.sqlName]));
-      const rh = ch("md5").update(vals.map(v => v ?? "").join("|")).digest("hex");
+      const rh = ch("md5").update(mapping.map(c => sanitizeCsvField(row[c.sqlName])).join("|")).digest("hex");
       vals.push(rh);
       bulk.rows.add(...(vals as Parameters<typeof bulk.rows.add>));
     }
@@ -108,12 +141,10 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
   if (!stagingHasData) {
     // Create staging table (Phase 2 inserts directly into target — no staging needed)
-    if (!phase2) {
-      await pool.request().query(
-        `IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging};
-         CREATE TABLE ${staging} (${colDefs})`,
-      );
-    }
+    await pool.request().query(
+      `IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging};
+       CREATE TABLE ${staging} (${colDefs})`,
+    );
   } else {
     console.log("[importUpload] staging já populado, pulando carga (retry idempotente) upload=%s", uploadId);
   }
@@ -127,7 +158,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     const ext = extname(upload.originalFilename).toLowerCase();
     const smallCsv = !phase2 && ext === ".csv" && Number(upload.sizeBytes) <= SMALL_CSV_TDS_THRESHOLD_BYTES;
     const useBlob = !!env().CATWORLD_AZURE_BLOB_CONNECTION_STRING && !smallCsv;
-    const destTable = phase2 ? tableName : stage;
+    const destTable = stage;
     const preview = upload.previewJson ? JSON.parse(upload.previewJson) as FilePreview : null;
     const opts: RowsFromFileOpts = { encoding: preview?.encoding ?? "utf8", separator: preview?.separator ?? ",", ext };
 
@@ -178,8 +209,6 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
           // Phase 2 inserts directly into the target (no staging) — TDS fallback would risk
           // duplicates if BULK INSERT partially succeeded. Let the worker retry naturally.
-          if (phase2) throw bulkError;
-
           console.warn("[importUpload] BULK INSERT falhou (%s), tentando TDS fallback upload=%s", message.slice(0, 80), uploadId);
           phaseTimings.importMethod = "tds-fallback-after-bulk-error";
 
@@ -217,11 +246,20 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     await tx.begin();
     try {
       const request = new sql.Request(tx);
+      const targetColDefs = typedColumnDefs(mapping);
+      const colList = mapping.map(c => quoteIdentifier(c.sqlName)).join(",");
+      const typedSelect = mapping.map(c => typedSelectExpr(c, "s")).join(",");
 
       if (phase2) {
         // Phase 2: new rows already BULK inserted into target.
         // Delete removed rows using batched IN clauses — avoids #cw_del temp table compilation issue.
-        inserted = total;
+        const insertStats = await request.query(`
+          INSERT INTO ${target} (${colList},[_cw_rh])
+            SELECT ${typedSelect},s.[_cw_rh] FROM ${staging} s
+            WHERE NOT EXISTS(SELECT 1 FROM ${target} t WHERE t.[_cw_rh]=s.[_cw_rh]);
+          SELECT @@ROWCOUNT inserted;
+        `);
+        inserted = Number(insertStats.recordset[0]?.inserted ?? total);
         if (toDelete.length > 0) {
           const BATCH = 500;
           for (let i = 0; i < toDelete.length; i += BATCH) {
@@ -234,13 +272,13 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
             updated += Number(delRes.recordset[0]?.deleted ?? 0);
           }
         }
+        await request.query(`DROP TABLE ${staging}`);
       } else if (deltaReplace) {
         // Phase 1: full file in staging — INSERT new rows, DELETE removed rows
-        const colList = mapping.map(c => quoteIdentifier(c.sqlName)).join(",");
         const deltaStats = await request.query(`
           DECLARE @ins INT, @del INT;
           INSERT INTO ${target} (${colList},[_cw_rh])
-            SELECT ${colList},[_cw_rh] FROM ${staging} s
+            SELECT ${typedSelect},s.[_cw_rh] FROM ${staging} s
             WHERE NOT EXISTS(SELECT 1 FROM ${target} t WHERE t.[_cw_rh]=s.[_cw_rh]);
           SET @ins=@@ROWCOUNT;
           DELETE t FROM ${target} t
@@ -253,14 +291,19 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
         updated = Number(deltaStats.recordset[0]?.deleted ?? 0);
       } else if (upload.mode === "replace" || !targetExists) {
         // Full replace: add hash index then rename staging to target
-        await pool.request().query(`CREATE INDEX [IX__cw_rh] ON ${staging} ([_cw_rh])`);
         if (targetExists) await request.query(`DROP TABLE ${target}`);
-        await request.query(`EXEC sp_rename N'${schema}.${stage}', N'${tableName}'`);
+        await request.query(`
+          CREATE TABLE ${target} (${targetColDefs},[_cw_rh] CHAR(32) NULL);
+          INSERT INTO ${target} (${colList},[_cw_rh])
+            SELECT ${typedSelect},s.[_cw_rh] FROM ${staging} s;
+          CREATE INDEX [IX__cw_rh] ON ${target} ([_cw_rh]);
+          DROP TABLE ${staging};
+        `);
         inserted = total;
       } else if (upload.mode === "append") {
         await request.query(
           `INSERT INTO ${target} (${mapping.map(c => quoteIdentifier(c.sqlName)).join(",")})
-           SELECT ${mapping.map(c => quoteIdentifier(c.sqlName)).join(",")} FROM ${staging};
+           SELECT ${typedSelect} FROM ${staging} s;
            DROP TABLE ${staging}`,
         );
         inserted = total;
@@ -268,22 +311,25 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
         // Upsert (MERGE)
         if (!upload.keyColumn) throw new Error("Upsert exige coluna-chave");
         const key = quoteIdentifier(upload.keyColumn);
+        const keyColumn = mapping.find(c => c.sqlName === upload.keyColumn);
+        if (!keyColumn) throw new Error("Coluna-chave não encontrada no arquivo");
+        const keyExpr = typedSelectExpr(keyColumn, "s");
         const nonKey = mapping.filter(c => c.sqlName !== upload.keyColumn);
         const duplicates = await request.query(
           `SELECT ${key}, COUNT(*) n FROM ${staging} GROUP BY ${key} HAVING COUNT(*) > 1`,
         );
         if (duplicates.recordset.length) throw new Error("Arquivo contém chaves duplicadas para upsert");
         const whenMatched = nonKey.length > 0
-          ? `WHEN MATCHED THEN UPDATE SET ${nonKey.map(c => `t.${quoteIdentifier(c.sqlName)}=s.${quoteIdentifier(c.sqlName)}`).join(",")}`
+          ? `WHEN MATCHED THEN UPDATE SET ${nonKey.map(c => `t.${quoteIdentifier(c.sqlName)}=${typedSelectExpr(c, "s")}`).join(",")}`
           : "";
         const merge = await request.query(`
           DECLARE @stats TABLE (action NVARCHAR(10));
           MERGE INTO ${target} AS t
-          USING ${staging} AS s ON t.${key}=s.${key}
+          USING ${staging} AS s ON t.${key}=${keyExpr}
           ${whenMatched}
           WHEN NOT MATCHED BY TARGET THEN
             INSERT (${mapping.map(c => quoteIdentifier(c.sqlName)).join(",")})
-            VALUES (${mapping.map(c => `s.${quoteIdentifier(c.sqlName)}`).join(",")})
+            VALUES (${mapping.map(c => typedSelectExpr(c, "s")).join(",")})
           OUTPUT $action INTO @stats;
           SELECT
             SUM(CASE WHEN action='UPDATE' THEN 1 ELSE 0 END) updated,
@@ -316,21 +362,17 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       phaseTimings.totalImportMs = Date.now() - importStarted;
       console.log("[importUpload:perf]", JSON.stringify({ uploadId: upload.id, file: upload.originalFilename, rows: Number(actual), ...phaseTimings }));
 
-      // The physical import table stores data columns as NVARCHAR(MAX). Keep catalog
-      // metadata aligned with the real SQL schema so UI/SDK type reporting is stable.
-      const storedMapping = mapping.map(c => ({ ...c, sqlType: "NVARCHAR(MAX)" }));
-
       // Batch column metadata inserts to stay under SQL Server 2100-parameter limit
       const MAX_COLS_PER_BATCH = 500;
-      for (let batchStart = 0; batchStart < storedMapping.length; batchStart += MAX_COLS_PER_BATCH) {
-        const batch = storedMapping.slice(batchStart, batchStart + MAX_COLS_PER_BATCH);
+      for (let batchStart = 0; batchStart < mapping.length; batchStart += MAX_COLS_PER_BATCH) {
+        const batch = mapping.slice(batchStart, batchStart + MAX_COLS_PER_BATCH);
         const colReq = pool.request();
         colReq.input("tableId", sql.UniqueIdentifier, table.id);
         colReq.input("uploadId", sql.UniqueIdentifier, upload.id);
         colReq.input("actual", sql.BigInt, actual);
         colReq.input("inserted", sql.BigInt, inserted);
         colReq.input("updated", sql.BigInt, updated);
-        colReq.input("schemaJson", sql.NVarChar(sql.MAX), JSON.stringify(storedMapping));
+        colReq.input("schemaJson", sql.NVarChar(sql.MAX), JSON.stringify(mapping));
         colReq.input("detailJson", sql.NVarChar(sql.MAX), JSON.stringify({ file: upload.originalFilename, rows: Number(actual), ...phaseTimings }));
         const colValues = batch.map((c, i) => {
           const gi = batchStart + i;
@@ -413,20 +455,16 @@ async function checkHasDeltaCol(pool: sql.ConnectionPool, schema: string, table:
 
 async function schemaMatchesSilent(pool: sql.ConnectionPool, schema: string, table: string, mapping: ParsedColumn[]): Promise<boolean> {
   try {
-    // Check names AND that every data column is NVARCHAR nullable (system_type_id 231 = nvarchar).
-    // Old tables with typed NOT NULL columns (DATE, DATETIME2, etc.) must fall through to full replace
-    // to avoid implicit NULL conversion errors during delta INSERT.
     const result = await pool.request()
       .input("schema", sql.NVarChar, schema)
       .input("table", sql.NVarChar, table)
-      .query("SELECT c.name, c.system_type_id, c.is_nullable FROM sys.columns c WHERE c.object_id=OBJECT_ID(QUOTENAME(@schema)+'.'+QUOTENAME(@table)) ORDER BY c.column_id");
-    const rows = result.recordset as { name: string; system_type_id: number; is_nullable: boolean }[];
+      .query("SELECT c.name, ty.name type_name, c.precision, c.scale, c.is_nullable FROM sys.columns c JOIN sys.types ty ON c.user_type_id=ty.user_type_id WHERE c.object_id=OBJECT_ID(QUOTENAME(@schema)+'.'+QUOTENAME(@table)) ORDER BY c.column_id");
+    const rows = result.recordset as { name: string; type_name: string; precision: number; scale: number; is_nullable: boolean }[];
     const dataRows = rows.filter(r => r.name !== "_cw_rh");
     const actual = dataRows.map(r => r.name);
     const expected = mapping.map(c => c.sqlName);
     if (JSON.stringify(actual) !== JSON.stringify(expected)) return false;
-    // All data columns must be NVARCHAR (231) and nullable for delta replace to be safe
-    return dataRows.every(r => r.system_type_id === 231 && r.is_nullable);
+    return dataRows.every((r, i) => physicalTypeMatches(r, mapping[i]!.sqlType) && r.is_nullable);
   } catch { return false; }
 }
 
@@ -434,11 +472,24 @@ async function assertCompatible(request: sql.Request, schema: string, table: str
   const result = await request
     .input("schema", sql.NVarChar, schema)
     .input("table", sql.NVarChar, table)
-    .query("SELECT c.name FROM sys.columns c JOIN sys.types t ON c.user_type_id=t.user_type_id WHERE c.object_id=OBJECT_ID(QUOTENAME(@schema)+'.'+QUOTENAME(@table)) ORDER BY c.column_id");
-  const actual = result.recordset.map((r: Record<string, unknown>) => String(r.name)).filter((n: string) => n !== "_cw_rh");
+    .query("SELECT c.name, t.name type_name, c.precision, c.scale FROM sys.columns c JOIN sys.types t ON c.user_type_id=t.user_type_id WHERE c.object_id=OBJECT_ID(QUOTENAME(@schema)+'.'+QUOTENAME(@table)) ORDER BY c.column_id");
+  const actualRows = result.recordset.filter((r: Record<string, unknown>) => String(r.name) !== "_cw_rh") as { name: string; type_name: string; precision: number; scale: number }[];
+  const actual = actualRows.map(r => r.name);
   const expected = columns.map(c => c.sqlName);
   if (JSON.stringify(actual) !== JSON.stringify(expected))
     throw new Error(`Schema incompatível. Esperado: ${expected.join(", ")}; atual: ${actual.join(", ")}`);
+  if (!actualRows.every((r, i) => physicalTypeMatches(r, columns[i]!.sqlType)))
+    throw new Error("Schema incompatível: tipos da tabela atual diferem do arquivo");
+}
+
+function physicalTypeMatches(row: { type_name: string; precision?: number; scale?: number }, expected: string) {
+  const type = row.type_name.toLowerCase();
+  if (expected === "BIGINT") return type === "bigint";
+  if (expected.startsWith("DECIMAL")) return type === "decimal" && Number(row.precision) === 18 && Number(row.scale) === 4;
+  if (expected === "DATE") return type === "date";
+  if (expected === "DATETIME2") return type === "datetime2";
+  if (expected === "TIME") return type === "time";
+  return type === "nvarchar";
 }
 
 export function convert(v: unknown, type: string) {
