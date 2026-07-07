@@ -50,10 +50,18 @@ export async function deleteBlob(blobName: string) {
 }
 
 export async function copyBlob(sourceBlobName: string, destBlobName: string) {
+  const e = env();
   const container = containerClient();
   const sourceClient = container.getBlockBlobClient(sourceBlobName);
   const destClient = container.getBlockBlobClient(destBlobName);
-  await destClient.syncCopyFromURL(sourceClient.url);
+  // Must use a SAS URL so SQL Server / Azure Copy API can auth against a private container
+  const credential = sharedKeyCredential();
+  const sas = generateBlobSASQueryParameters(
+    { containerName: e.CATWORLD_AZURE_BLOB_CONTAINER, blobName: sourceBlobName, permissions: BlobSASPermissions.parse("r"), expiresOn: new Date(Date.now() + 60 * 60_000) },
+    credential
+  );
+  const sasUrl = `${sourceClient.url}?${sas}`;
+  await destClient.syncCopyFromURL(sasUrl);
 }
 
 export async function ensureContainer() {

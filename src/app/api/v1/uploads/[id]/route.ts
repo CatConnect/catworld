@@ -1,11 +1,12 @@
 ﻿import type { NextRequest } from "next/server";
 import { createGunzip } from "node:zlib";
+import { extname } from "node:path";
 import { Readable } from "node:stream";
 import { z } from "zod";
 import { prisma } from "@/server/db";
 import { resolveActor } from "@/server/auth/actor";
 import { canAccess, hasAnyWriteGrant } from "@/server/auth/permissions";
-import { writeFile } from "@/server/storage";
+import { writeFile, copyFile } from "@/server/storage";
 import { ApiError, handleApiError, ok } from "@/server/http";
 
 export async function GET(r: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -32,6 +33,9 @@ export async function PUT(r: NextRequest, { params }: { params: Promise<{ id: st
     }
 
     await writeFile(upload.blobName, body);
+    // Immediately copy to originals/ so the blob survives any lifecycle policy on uploads/ prefix
+    const ext = extname(upload.originalFilename).toLowerCase();
+    await copyFile(upload.blobName, `originals/${upload.id}${ext}`).catch(() => {});
     return ok({ stored: true });
   } catch (e) {
     return handleApiError(e);

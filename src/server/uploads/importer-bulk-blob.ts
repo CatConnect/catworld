@@ -51,7 +51,7 @@ export async function bulkInsertFromBlob(
   knownRowCount = 0
 ): Promise<BulkBlobResult> {
   const { connStr, account, key, container } = blobEnv();
-  const cleanBlobName = `tmp/bulk-v2-${uploadId}.csv`;
+  const cleanBlobName = `bulkimport/${uploadId}.csv`;
   const timings: Record<string, number> = {};
   const mark = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
     const started = Date.now();
@@ -135,26 +135,18 @@ export async function bulkInsertFromBlob(
   const tempDs = `CatworldBulkDS_${hash}`;
   let bulkAttempts = 0;
 
-  // Combine DROP + CREATE into single batch per object to eliminate race conditions
-  async function ensureCredential(sas: string) {
-    await pool.request().query(`
-      IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name='${tempCred}')
-        DROP DATABASE SCOPED CREDENTIAL [${tempCred}];
-      CREATE DATABASE SCOPED CREDENTIAL [${tempCred}]
-      WITH IDENTITY = 'SHARED ACCESS SIGNATURE', SECRET = '${sas}'
-    `);
-  }
-
-  async function ensureDataSource() {
+  // Single atomic batch: drop DS first (depends on credential), then credential, then recreate both.
+  // This prevents "credential already exists" when a previous cleanup left the DS referencing the credential.
+  async function ensureCredentialAndDataSource(sas: string) {
     await pool.request().query(`
       IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name='${tempDs}')
         DROP EXTERNAL DATA SOURCE [${tempDs}];
+      IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name='${tempCred}')
+        DROP DATABASE SCOPED CREDENTIAL [${tempCred}];
+      CREATE DATABASE SCOPED CREDENTIAL [${tempCred}]
+        WITH IDENTITY = 'SHARED ACCESS SIGNATURE', SECRET = '${sas}';
       CREATE EXTERNAL DATA SOURCE [${tempDs}]
-      WITH (
-        TYPE = BLOB_STORAGE,
-        LOCATION = 'https://${account}.blob.core.windows.net',
-        CREDENTIAL = [${tempCred}]
-      )
+        WITH (TYPE = BLOB_STORAGE, LOCATION = 'https://${account}.blob.core.windows.net', CREDENTIAL = [${tempCred}])
     `);
   }
 
@@ -191,8 +183,7 @@ export async function bulkInsertFromBlob(
           credential
         ).toString();
 
-        await ensureCredential(sas);
-        await ensureDataSource();
+        await ensureCredentialAndDataSource(sas);
         await mark("bulkInsertMs", () => bulkReq.query(bulkSql));
         break;
       } catch (error) {
