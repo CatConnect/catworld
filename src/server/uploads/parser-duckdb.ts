@@ -31,23 +31,36 @@ export async function* rowsFromCsvDuckDB(
 
   // Get actual column names from DuckDB to build originalName → sqlName mapping
   const headerResult = await conn.runAndReadAll(
-    `SELECT * FROM read_csv_auto('${safeFilePath}', sample_size=-1, all_varchar=true) LIMIT 0`,
+    `SELECT * FROM read_csv_auto('${safeFilePath}', sample_size=-1, null_padding=true, all_varchar=true) LIMIT 0`,
   );
   const duckHeaders: string[] = [];
   for (let i = 0; i < headerResult.columnCount; i++) {
     duckHeaders.push(headerResult.columnName(i));
   }
 
-  const colIndices: number[] = columns.map((col) => {
-    const idx = duckHeaders.indexOf(col.originalName);
-    return idx >= 0 ? idx : -1;
+  // Build index mapping with duplicate-header support.
+  // indexOf() always returns the first match, so a second column named "nome"
+  // would wrongly map to position 0. Track consumed positions per name.
+  const headerPositions = new Map<string, number[]>();
+  for (let i = 0; i < duckHeaders.length; i++) {
+    const h = duckHeaders[i]!;
+    if (!headerPositions.has(h)) headerPositions.set(h, []);
+    headerPositions.get(h)!.push(i);
+  }
+  const nameConsumed = new Map<string, number>();
+  const colIndices: number[] = columns.map((col, fallbackIdx) => {
+    const positions = headerPositions.get(col.originalName);
+    if (!positions) return fallbackIdx; // empty/renamed header → positional fallback
+    const used = nameConsumed.get(col.originalName) ?? 0;
+    nameConsumed.set(col.originalName, used + 1);
+    return positions[used] ?? fallbackIdx;
   });
 
   try {
     // all_varchar=true: return raw strings, no type casting — same as csv-parse behaviour.
     // Without this, DuckDB converts "10.50" → 10.5 and dates to ISO, breaking downstream logic.
     const reader = await conn.stream(
-      `SELECT * FROM read_csv_auto('${safeFilePath}', sample_size=-1, ignore_errors=true, all_varchar=true)`,
+      `SELECT * FROM read_csv_auto('${safeFilePath}', sample_size=-1, null_padding=true, all_varchar=true)`,
     );
 
     for await (const chunk of reader) {
