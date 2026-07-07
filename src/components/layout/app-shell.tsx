@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
-  Activity, Bell, ChevronRight, CircleUserRound, CloudCog, Database,
+  Activity, ArrowUpFromLine, Bell, ChevronRight, CircleUserRound, CloudCog, Database,
   FileKey2, FolderKanban, KeyRound, LayoutDashboard, Menu, Moon, Search,
   Settings, Sun, UsersRound, X,
 } from "lucide-react";
@@ -12,6 +12,7 @@ import {
 const nav = [
   { href: "/dashboard", label: "Visão geral", icon: LayoutDashboard },
   { href: "/projects", label: "Projetos", icon: FolderKanban },
+  { href: "/uploads", label: "Uploads", icon: ArrowUpFromLine },
   { href: "/users", label: "Usuários", icon: UsersRound },
   { href: "/tokens", label: "Tokens", icon: KeyRound },
   { href: "/database-users", label: "Usuários do banco", icon: FileKey2 },

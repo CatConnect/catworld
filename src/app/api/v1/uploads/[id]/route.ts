@@ -58,7 +58,18 @@ export async function POST(r: NextRequest, { params }: { params: Promise<{ id: s
       return ok(await queueImportUpload(actor, id, input), undefined, 202);
     }
 
-    throw new ApiError(400, "INVALID_ACTION", "A??o de upload inv?lida");
+    if (action === "cancel") {
+      const CANCELLABLE = ["PENDING_UPLOAD","QUEUED_PREVIEW","PREVIEWING","AWAITING_CONFIRMATION","QUEUED_IMPORT","IMPORTING","RETRYING"];
+      const upload = await prisma.upload.findUniqueOrThrow({ where: { id }, select: { status: true } });
+      if (!CANCELLABLE.includes(upload.status)) throw new ApiError(409, "NOT_CANCELLABLE", "Upload não pode ser cancelado no status atual");
+      await prisma.$transaction(async (tx) => {
+        await tx.upload.update({ where: { id }, data: { status: "FAILED", errorMessage: "Cancelado pelo usuário" } });
+        await tx.job.updateMany({ where: { uploadId: id, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "FAILED", lastError: "Cancelled" } });
+      });
+      return ok({ cancelled: true });
+    }
+
+    throw new ApiError(400, "INVALID_ACTION", "Ação de upload inválida");
   } catch (e) {
     return handleApiError(e);
   }
