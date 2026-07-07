@@ -63,10 +63,11 @@ export function UploadCard({ upload }: { upload: UploadWithDataset }) {
     }
   };
 
-  const destination = upload.dataset
-    ? upload.dataset.project
-      ? `${upload.dataset.project.name} → ${upload.dataset.name}`
-      : upload.dataset.name
+  const ds = upload.dataset;
+  const destination = ds
+    ? ds.project?.name
+      ? `${ds.project.name} → ${ds.name}`
+      : ds.name
     : "Destino pendente";
 
   return (

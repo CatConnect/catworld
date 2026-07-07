@@ -3,16 +3,16 @@
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useCallback } from "react";
 
-interface Dataset { id: string; name: string }
+interface Project { id: string; name: string }
 
 interface Props {
-  datasets: Dataset[];
+  projects: Project[];
   currentStatus: string;
-  currentDatasetId: string;
+  currentProjectId: string;
   statusLabels: Record<string, string>;
 }
 
-export function UploadFilters({ datasets, currentStatus, currentDatasetId, statusLabels }: Props) {
+export function UploadFilters({ projects, currentStatus, currentProjectId, statusLabels }: Props) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -31,6 +31,8 @@ export function UploadFilters({ datasets, currentStatus, currentDatasetId, statu
     [router, pathname, searchParams],
   );
 
+  const hasFilter = currentStatus || currentProjectId;
+
   return (
     <div className="flex flex-wrap gap-2">
       <select
@@ -46,22 +48,19 @@ export function UploadFilters({ datasets, currentStatus, currentDatasetId, statu
 
       <select
         className="select select-sm select-bordered w-auto"
-        value={currentDatasetId}
-        onChange={(e) => update("datasetId", e.target.value)}
+        value={currentProjectId}
+        onChange={(e) => update("projectId", e.target.value)}
       >
-        <option value="">Todos os datasets</option>
-        {datasets.map((d) => (
-          <option key={d.id} value={d.id}>{d.name}</option>
+        <option value="">Todos os projetos</option>
+        {projects.map((p) => (
+          <option key={p.id} value={p.id}>{p.name}</option>
         ))}
       </select>
 
-      {(currentStatus || currentDatasetId) && (
+      {hasFilter && (
         <button
           className="btn btn-ghost btn-sm"
-          onClick={() => {
-            const params = new URLSearchParams();
-            router.push(pathname + (params.toString() ? `?${params}` : ""));
-          }}
+          onClick={() => router.push(pathname)}
         >
           Limpar filtros
         </button>

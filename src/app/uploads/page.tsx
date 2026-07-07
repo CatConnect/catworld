@@ -29,16 +29,16 @@ export default async function UploadsPage({
 }) {
   const params = await searchParams;
   const status = params.status ?? "";
-  const datasetId = params.datasetId ?? "";
+  const projectId = params.projectId ?? "";
   const page = Math.max(1, parseInt(params.page ?? "1", 10));
   const skip = (page - 1) * PAGE_SIZE;
 
   const where = {
     ...(status ? { status } : {}),
-    ...(datasetId ? { datasetId } : {}),
+    ...(projectId ? { dataset: { projectId } } : {}),
   };
 
-  const [uploads, total, datasets, queued] = await Promise.all([
+  const [uploads, total, projects, queued] = await Promise.all([
     prisma.upload.findMany({
       where,
       orderBy: { createdAt: "desc" },
@@ -47,7 +47,7 @@ export default async function UploadsPage({
       include: { dataset: { include: { project: true } } },
     }),
     prisma.upload.count({ where }),
-    prisma.dataset.findMany({ where: { active: true }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
+    prisma.project.findMany({ where: { active: true }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
     prisma.upload.count({ where: { status: { in: CANCELLABLE } } }),
   ]);
 
@@ -66,9 +66,9 @@ export default async function UploadsPage({
         <div className="flex flex-col gap-4 border-b border-base-300 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
           <Suspense fallback={<div className="flex gap-2"><div className="skeleton h-8 w-32 rounded-lg" /><div className="skeleton h-8 w-36 rounded-lg" /></div>}>
             <UploadFilters
-              datasets={datasets}
+              projects={projects}
               currentStatus={status}
-              currentDatasetId={datasetId}
+              currentProjectId={projectId}
               statusLabels={STATUS_LABELS}
             />
           </Suspense>
