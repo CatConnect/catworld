@@ -55,7 +55,7 @@ async function work(job: Claimed) {
   // Guard: skip if already COMPLETED or FAILED (cancelled/re-queued after success)
   if (upload.status === "COMPLETED" || upload.status === "FAILED") {
     console.log(`[worker] upload ${upload.id} já está ${upload.status}, pulando job`);
-    await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null } });
+    await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
     return;
   }
 
@@ -109,7 +109,7 @@ async function work(job: Claimed) {
       throw new Error(`Tipo de job desconhecido: ${job.type}`);
     }
 
-    await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null } });
+    await prisma.job.update({ where: { id: job.id }, data: { status: "COMPLETED", lockedAt: null, lockedBy: null, heartbeatAt: null, lastError: null } });
     // Only delete blobs after the import is fully done — not after preview
     if (job.type === "IMPORT_UPLOAD") {
       await deleteFile(upload.blobName).catch(() => {});
@@ -168,21 +168,32 @@ async function fail(job: Claimed, error: unknown) {
 }
 
 async function recoverStale() {
-  // Mark stale RUNNING jobs that exceeded max attempts as FAILED
+  // Mark stale RUNNING jobs that exceeded max attempts as FAILED.
+  // Imports can legitimately spend several minutes inside Azure SQL/Bulk APIs,
+  // so they get a longer stale window than preview/lightweight jobs.
   await prisma.$executeRawUnsafe(
     `UPDATE dbo.cw_jobs
      SET status='FAILED', locked_at=NULL, locked_by=NULL, heartbeat_at=NULL,
          last_error='Worker crashed (stale heartbeat, max attempts reached)'
      WHERE status='RUNNING'
-       AND heartbeat_at < DATEADD(SECOND,-120,SYSUTCDATETIME())
+       AND heartbeat_at < CASE
+         WHEN type='IMPORT_UPLOAD' THEN DATEADD(MINUTE,-30,SYSUTCDATETIME())
+         ELSE DATEADD(SECOND,-120,SYSUTCDATETIME())
+       END
        AND attempts >= max_attempts`,
   );
 
   // Re-queue stale RUNNING jobs that still have retries left
-  await prisma.job.updateMany({
-    where: { status: "RUNNING", heartbeatAt: { lt: new Date(Date.now() - 120000) } },
-    data: { status: "QUEUED", lockedAt: null, lockedBy: null, heartbeatAt: null, availableAt: new Date() },
-  });
+  await prisma.$executeRawUnsafe(
+    `UPDATE dbo.cw_jobs
+     SET status='QUEUED', locked_at=NULL, locked_by=NULL, heartbeat_at=NULL, available_at=SYSUTCDATETIME()
+     WHERE status='RUNNING'
+       AND heartbeat_at < CASE
+         WHEN type='IMPORT_UPLOAD' THEN DATEADD(MINUTE,-30,SYSUTCDATETIME())
+         ELSE DATEADD(SECOND,-120,SYSUTCDATETIME())
+       END
+       AND attempts < max_attempts`,
+  );
 
   // Fix IMPORTING uploads whose all jobs are now FAILED (no active job left)
   await prisma.$executeRawUnsafe(

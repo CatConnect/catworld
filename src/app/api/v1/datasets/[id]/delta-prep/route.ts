@@ -9,48 +9,91 @@ import { sqlIdentifier, quoteIdentifier } from "@/server/security/naming";
 import { ApiError, handleApiError } from "@/server/http";
 import { env } from "@/server/env";
 
-// Streams current _cw_rh hash values for a table so the SDK can compute delta client-side.
-// Response body: newline-delimited MD5 hashes (one per row, no header).
-// Headers: X-CW-Capable, X-CW-Table-Id, X-CW-Row-Count, X-CW-Mapping (JSON).
-// Returns X-CW-Capable: false if delta is not supported for this table.
+const inputSchema = z.object({
+  filename: z.string().min(1).max(500),
+  tableId: z.string().uuid().nullable().optional(),
+});
+
+function notCapable(reason: string) {
+  return new Response(null, {
+    status: 200,
+    headers: { "X-CW-Capable": "false", "X-CW-Reason": reason },
+  });
+}
+
 export async function POST(r: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
-    const a = await resolveActor(r);
+    const actor = await resolveActor(r);
     const datasetId = (await params).id;
-    const { filename } = z.object({ filename: z.string().min(1).max(500) }).parse(await r.json());
+    const { filename, tableId } = inputSchema.parse(await r.json());
 
-    const notCapable = (reason?: string) =>
-      new Response(null, { status: 200, headers: { "X-CW-Capable": "false", ...(reason ? { "X-CW-Reason": reason } : {}) } });
-
-    // Phase 2 only works with blob storage (direct BULK INSERT path)
-    if (!env().CATWORLD_AZURE_BLOB_CONNECTION_STRING) return notCapable("no-blob");
+    if (!filename.toLowerCase().endsWith(".csv")) return notCapable("not-csv");
+    if (!env().CATWORLD_AZURE_BLOB_CONNECTION_STRING) return notCapable("storage-unavailable");
 
     const dataset = await prisma.dataset.findUnique({ where: { id: datasetId } });
     if (!dataset) throw new ApiError(404, "DATASET_NOT_FOUND", "Dataset não encontrado");
-    if (!await canAccess(a, "READ", dataset.projectId, dataset.id))
-      return new Response("Forbidden", { status: 403 });
+    if (!await canAccess(actor, "READ", dataset.projectId, dataset.id)) return new Response("Forbidden", { status: 403 });
 
-    const tableName = sqlIdentifier(filename.replace(/\.[^.]+$/, ""));
-    const table = await prisma.datasetTable.findUnique({
-      where: { datasetId_sqlName: { datasetId, sqlName: tableName } },
-      include: { columns: { orderBy: { ordinal: "asc" } } },
-    });
-    if (!table) return notCapable("no-table");
+    let table = tableId
+      ? await prisma.datasetTable.findFirst({
+          where: { id: tableId, datasetId },
+          include: { columns: { orderBy: { ordinal: "asc" } } },
+        })
+      : null;
+
+    if (!table) {
+      const previousUpload = await prisma.upload.findFirst({
+        where: { datasetId, originalFilename: filename, status: "COMPLETED", tableId: { not: null } },
+        orderBy: { updatedAt: "desc" },
+        include: { table: { include: { columns: { orderBy: { ordinal: "asc" } } } } },
+      });
+      table = previousUpload?.table ?? null;
+    }
+
+    if (!table) {
+      const expectedTableName = sqlIdentifier(filename.replace(/\.[^.]+$/, ""));
+      table = await prisma.datasetTable.findUnique({
+        where: { datasetId_sqlName: { datasetId, sqlName: expectedTableName } },
+        include: { columns: { orderBy: { ordinal: "asc" } } },
+      });
+    }
+
+    if (!table) return notCapable("first-upload");
 
     const pool = await sqlPool();
     const schema = dataset.schemaName;
+    const tableName = table.sqlName;
     const target = `${quoteIdentifier(schema)}.${quoteIdentifier(tableName)}`;
 
-    const hasDelta = await pool.request()
+    const columnResult = await pool.request()
       .input("schema", sql.NVarChar, schema)
       .input("table", sql.NVarChar, tableName)
-      .query("SELECT 1 ok FROM sys.columns WHERE object_id=OBJECT_ID(QUOTENAME(@schema)+'.'+QUOTENAME(@table)) AND name='_cw_rh'");
-    if (!hasDelta.recordset.length) return notCapable("no-hash-col");
+      .query(`
+        SELECT c.name, ty.name type_name, c.is_nullable
+        FROM sys.columns c
+        JOIN sys.types ty ON c.user_type_id=ty.user_type_id
+        WHERE c.object_id=OBJECT_ID(QUOTENAME(@schema)+'.'+QUOTENAME(@table))
+        ORDER BY c.column_id
+      `);
+
+    const physicalColumns = columnResult.recordset as { name: string; type_name: string; is_nullable: boolean }[];
+    if (!physicalColumns.length) return notCapable("no-table");
+    if (!physicalColumns.some(c => c.name === "_cw_rh")) return notCapable("no-hash-col");
+
+    const dataColumns = physicalColumns.filter(c => c.name !== "_cw_rh");
+    const expected = table.columns.map(c => c.sqlName);
+    const actual = dataColumns.map(c => c.name);
+    const namesMatch = JSON.stringify(actual) === JSON.stringify(expected);
+    const typesMatch = dataColumns.every(c => c.type_name.toLowerCase() === "nvarchar" && c.is_nullable);
+    if (!namesMatch || !typesMatch) return notCapable("schema-mismatch");
 
     const countResult = await pool.request().query(`SELECT COUNT_BIG(*) n FROM ${target}`);
     const rowCount = Number(countResult.recordset[0].n);
     const existingMapping = table.columns.map(c => ({
-      originalName: c.originalName, sqlName: c.sqlName, sqlType: c.sqlType, nullable: c.nullable,
+      originalName: c.originalName,
+      sqlName: c.sqlName,
+      sqlType: "NVARCHAR(MAX)",
+      nullable: true,
     }));
 
     const enc = new TextEncoder();

@@ -146,7 +146,7 @@ export async function bulkInsertFromBlob(
       CREATE DATABASE SCOPED CREDENTIAL [${tempCred}]
         WITH IDENTITY = 'SHARED ACCESS SIGNATURE', SECRET = '${sas}';
       CREATE EXTERNAL DATA SOURCE [${tempDs}]
-        WITH (TYPE = BLOB_STORAGE, LOCATION = 'https://${account}.blob.core.windows.net', CREDENTIAL = [${tempCred}])
+        WITH (TYPE = BLOB_STORAGE, LOCATION = 'https://${account}.blob.core.windows.net/${container}', CREDENTIAL = [${tempCred}])
     `);
   }
 
@@ -155,7 +155,7 @@ export async function bulkInsertFromBlob(
     (bulkReq as unknown as { timeout: number }).timeout = 30 * 60_000;
     const bulkSql = `
       BULK INSERT ${quoteIdentifier(schema)}.${quoteIdentifier(stagingTable)}
-      FROM '${container}/${cleanBlobName}'
+      FROM '${cleanBlobName}'
       WITH (
         DATA_SOURCE = '${tempDs}',
         FORMAT = 'CSV',

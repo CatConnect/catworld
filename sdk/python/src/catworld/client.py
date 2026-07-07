@@ -86,12 +86,14 @@ def _make_hash_converter(sql_type: str):
     if sql_type == "TIME":
         return lambda v: "" if (v is None or str(v).strip() == "") else str(v).strip()
 
-    # NVARCHAR (default): keep original value (not trimmed), wrap in double quotes
+    # NVARCHAR (default): same literal sanitizer used by sanitizeCsvField() on the server.
     def _nvarchar(v):
         s = str(v) if v is not None else ""
         if s.strip() == "":
             return '""'
-        return '"' + s.replace('"', '""') + '"'
+        s = s.replace('"', '""')
+        s = s.replace("\n", " ").replace("\r", " ").replace("\t", " ").replace("|", " ")
+        return '"' + s + '"'
     return _nvarchar
 
 
@@ -238,6 +240,7 @@ class CatworldClient:
         dataset_id: str,
         mode: str = "replace",
         key_column: str | None = None,
+        table_id: str | None = None,
         poll_interval: float = 2,
     ):
         file = Path(path)
@@ -270,7 +273,7 @@ class CatworldClient:
         # Option 3 Phase 2 — client-side delta: only for CSV replace mode
         delta: dict | None = None
         if mode == "replace" and file.suffix.lower() == ".csv":
-            delta = self._try_phase2(dataset_id, file.name, raw_bytes)
+            delta = self._try_phase2(dataset_id, file.name, raw_bytes, table_id)
 
         if delta:
             upload_bytes = delta["to_insert_bytes"]
@@ -322,10 +325,13 @@ class CatworldClient:
 
         confirm_body: dict = {
             "datasetId": dataset_id,
+            "tableId": table_id,
             "mode": mode,
             "keyColumn": key_column,
             "mapping": cols,
         }
+        if delta and delta.get("table_id"):
+            confirm_body["tableId"] = delta["table_id"]
         if delta:
             confirm_body["deltaToDelete"] = delta["to_delete"]
 
@@ -335,7 +341,7 @@ class CatworldClient:
         logger.info("Upload concluído: %s linha(s) importada(s)", result.get("rowCount", "?"))
         return result
 
-    def _try_phase2(self, dataset_id: str, filename: str, raw_bytes: bytes) -> dict | None:
+    def _try_phase2(self, dataset_id: str, filename: str, raw_bytes: bytes, table_id: str | None = None) -> dict | None:
         """
         Attempt Phase 2 client-side delta.
         Downloads current table hashes from server, computes delta locally.
@@ -344,17 +350,19 @@ class CatworldClient:
         try:
             resp = self._client.post(
                 f"/api/v1/datasets/{dataset_id}/delta-prep",
-                json={"filename": filename},
+                json={"filename": filename, "tableId": table_id},
                 timeout=120.0,  # hash streaming may take time for large tables
             )
             if not resp.is_success:
+                logger.info("[DELTA] indisponível: delta-prep HTTP %s; usando upload completo", resp.status_code)
                 return None
             if resp.headers.get("X-CW-Capable") != "true":
-                logger.debug("Phase 2 não suportado: %s", resp.headers.get("X-CW-Reason", "unknown"))
+                logger.info("[DELTA] indisponível: %s; usando upload completo", resp.headers.get("X-CW-Reason", "unknown"))
                 return None
 
             server_mapping: list[dict] = _json.loads(resp.headers.get("X-CW-Mapping", "[]"))
             server_row_count = int(resp.headers.get("X-CW-Row-Count", "0"))
+            resolved_table_id = resp.headers.get("X-CW-Table-Id")
 
             # Read all server hashes (one per line, no header)
             server_hash_set = {line for line in resp.text.splitlines() if len(line) == 32}
@@ -389,6 +397,7 @@ class CatworldClient:
                 "to_delete": to_delete,
                 "mapping": server_mapping,
                 "to_insert_count": to_insert_count,
+                "table_id": resolved_table_id,
             }
         except Exception as exc:
             logger.warning("Phase 2 falhou, usando upload completo: %s", exc)

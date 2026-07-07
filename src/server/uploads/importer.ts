@@ -316,17 +316,21 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       phaseTimings.totalImportMs = Date.now() - importStarted;
       console.log("[importUpload:perf]", JSON.stringify({ uploadId: upload.id, file: upload.originalFilename, rows: Number(actual), ...phaseTimings }));
 
+      // The physical import table stores data columns as NVARCHAR(MAX). Keep catalog
+      // metadata aligned with the real SQL schema so UI/SDK type reporting is stable.
+      const storedMapping = mapping.map(c => ({ ...c, sqlType: "NVARCHAR(MAX)" }));
+
       // Batch column metadata inserts to stay under SQL Server 2100-parameter limit
       const MAX_COLS_PER_BATCH = 500;
-      for (let batchStart = 0; batchStart < mapping.length; batchStart += MAX_COLS_PER_BATCH) {
-        const batch = mapping.slice(batchStart, batchStart + MAX_COLS_PER_BATCH);
+      for (let batchStart = 0; batchStart < storedMapping.length; batchStart += MAX_COLS_PER_BATCH) {
+        const batch = storedMapping.slice(batchStart, batchStart + MAX_COLS_PER_BATCH);
         const colReq = pool.request();
         colReq.input("tableId", sql.UniqueIdentifier, table.id);
         colReq.input("uploadId", sql.UniqueIdentifier, upload.id);
         colReq.input("actual", sql.BigInt, actual);
         colReq.input("inserted", sql.BigInt, inserted);
         colReq.input("updated", sql.BigInt, updated);
-        colReq.input("schemaJson", sql.NVarChar(sql.MAX), JSON.stringify(mapping));
+        colReq.input("schemaJson", sql.NVarChar(sql.MAX), JSON.stringify(storedMapping));
         colReq.input("detailJson", sql.NVarChar(sql.MAX), JSON.stringify({ file: upload.originalFilename, rows: Number(actual), ...phaseTimings }));
         const colValues = batch.map((c, i) => {
           const gi = batchStart + i;
@@ -352,7 +356,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
             VALUES(NEWID(),'UPLOAD_IMPORT_PERF','upload',@uploadId,@detailJson,1)
           UPDATE dbo.cw_uploads SET table_id=@tableId,status='COMPLETED',progress=100,
             row_count=@actual,inserted_count=@inserted,updated_count=@updated,
-            updated_at=SYSUTCDATETIME() WHERE id=@uploadId` : ""}
+            error_message=NULL,updated_at=SYSUTCDATETIME() WHERE id=@uploadId` : ""}
           COMMIT
         `);
       }

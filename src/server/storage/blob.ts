@@ -5,6 +5,7 @@ import {
   generateBlobSASQueryParameters,
 } from "@azure/storage-blob";
 import { Readable } from "node:stream";
+import type { Readable as NodeReadable } from "node:stream";
 import { extname } from "node:path";
 import { env } from "@/server/env";
 
@@ -63,7 +64,7 @@ export async function copyBlob(sourceBlobName: string, destBlobName: string) {
   }
   if (!response.readableStreamBody) throw new Error(`Blob source not found: ${sourceBlobName}`);
   try {
-    await destClient.uploadStream(response.readableStreamBody, 8 * 1024 * 1024, 4, {
+    await destClient.uploadStream(response.readableStreamBody as NodeReadable, 8 * 1024 * 1024, 4, {
       blobHTTPHeaders: { blobContentType: response.contentType ?? "application/octet-stream" },
     });
     console.log("[copyBlob] OK %s → %s", sourceBlobName, destBlobName);
