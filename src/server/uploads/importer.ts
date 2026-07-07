@@ -43,6 +43,48 @@ function typedSelectExpr(column: ParsedColumn, alias: string): string {
   return `${alias}.${quoteIdentifier(column.sqlName)}`;
 }
 
+// ─── Typed staging helpers ────────────────────────────────────────────────────
+
+/** SQL type for the staging table column — mirrors typedCsvField in importer-bulk-blob.ts */
+function stagingColType(sqlType: string): string {
+  if (sqlType === "BIGINT") return "BIGINT";
+  if (sqlType.startsWith("DECIMAL")) return "DECIMAL(18,4)";
+  if (sqlType === "DATE") return "DATE";
+  if (sqlType === "DATETIME2") return "DATETIME2";
+  if (sqlType === "TIME") return "TIME";
+  return "NVARCHAR(4000)";
+}
+
+/** mssql column type for TDS bulk copy into a typed staging table */
+function tdsColType(sqlType: string): sql.ISqlType | (() => sql.ISqlType) {
+  if (sqlType === "BIGINT") return sql.BigInt;
+  if (sqlType.startsWith("DECIMAL")) return sql.Decimal(18, 4);
+  if (sqlType === "DATE") return sql.Date;
+  if (sqlType === "DATETIME2") return sql.DateTime2;
+  if (sqlType === "TIME") return sql.Time;
+  return sql.NVarChar(4000);
+}
+
+/** Convert a raw string value to a JS value suitable for TDS into a typed staging column. */
+function convertForTds(v: unknown, sqlType: string): unknown {
+  const s = v == null ? "" : String(v).trim();
+  if (!s) return null;
+  if (sqlType === "BIGINT") {
+    if (!/^-?\d+$/.test(s)) return null;
+    return Number.parseInt(s, 10);
+  }
+  if (sqlType.startsWith("DECIMAL")) {
+    const n = Number.parseFloat(s.includes(",") ? s.replaceAll(".", "").replace(",", ".") : s);
+    return isNaN(n) ? null : n;
+  }
+  if (sqlType === "DATE" || sqlType === "DATETIME2") {
+    const d = normalizeDateLike(s);
+    return d ? new Date(d) : null;
+  }
+  if (sqlType === "TIME") return /^\d{1,2}:\d{2}(:\d{2})?$/.test(s) ? s : null;
+  return s || null;
+}
+
 // ─── TDS bulk copy ────────────────────────────────────────────────────────────
 // Used as the primary path for small CSVs/XLS and as automatic fallback when
 // BULK INSERT fails with an OLE DB provider error.
@@ -56,6 +98,7 @@ async function tdsBulkCopy(
   knownRowCount: number,
   uploadId: string,
   onProgress?: (rows: number) => void,
+  typed = true,
 ): Promise<number> {
   const batchDelay = env().CATWORLD_IMPORT_BATCH_DELAY_MS;
   const stringify = (v: unknown) => (v == null || String(v).trim() === "" ? null : String(v));
@@ -67,11 +110,15 @@ async function tdsBulkCopy(
     if (!batch.length) return;
     const bulk = new sql.Table(`${schema}.${destTable}`);
     bulk.create = false;
-    for (const c of mapping) bulk.columns.add(c.sqlName, sql.NVarChar(sql.MAX), { nullable: true });
+    for (const c of mapping) {
+      bulk.columns.add(c.sqlName, typed ? tdsColType(c.sqlType) : sql.NVarChar(sql.MAX), { nullable: true });
+    }
     bulk.columns.add("_cw_rh", sql.Char(32), { nullable: true });
     const { createHash: ch } = await import("node:crypto");
     for (const row of batch) {
-      const vals = mapping.map(c => stringify(row[c.sqlName]));
+      const vals = typed
+        ? mapping.map(c => convertForTds(row[c.sqlName], c.sqlType))
+        : mapping.map(c => stringify(row[c.sqlName]));
       const rh = ch("md5").update(mapping.map(c => sanitizeCsvField(row[c.sqlName])).join("|")).digest("hex");
       vals.push(rh);
       bulk.rows.add(...(vals as Parameters<typeof bulk.rows.add>));
@@ -115,11 +162,13 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
   const target = `${quoteIdentifier(schema)}.${quoteIdentifier(tableName)}`;
   const staging = `${quoteIdentifier(schema)}.${quoteIdentifier(stage)}`;
 
-  // NVARCHAR(4000) in staging is 3–5× faster than NVARCHAR(MAX) for BULK INSERT:
-  // SQL Server stores ≤4000-char values inline (row/overflow pages) instead of LOB B-tree pages.
-  // colDefsMax is kept as fallback if any value exceeds 4000 chars (triggers truncation error).
-  const colDefs    = mapping.map(c => `${quoteIdentifier(c.sqlName)} NVARCHAR(4000) NULL`).join(",") + ",[_cw_rh] CHAR(32) NULL";
+  // Typed staging: Node.js pre-converts values (typedCsvField) so BULK INSERT writes native types
+  // and the delta INSERT SELECT becomes a direct column copy — no TRY_CONVERT on Azure SQL (saves DTU).
+  // colDefsMax is kept as fallback when a NVARCHAR value exceeds 4000 chars (rare truncation error).
+  const colDefs    = mapping.map(c => `${quoteIdentifier(c.sqlName)} ${stagingColType(c.sqlType)} NULL`).join(",") + ",[_cw_rh] CHAR(32) NULL";
   const colDefsMax = mapping.map(c => `${quoteIdentifier(c.sqlName)} NVARCHAR(MAX)  NULL`).join(",") + ",[_cw_rh] CHAR(32) NULL";
+  // Set to false if truncation forces NVARCHAR(MAX) fallback — INSERT SELECT must use TRY_CONVERT then
+  let stagingIsTyped = true;
 
   const targetExists = Number(
     (await pool.request().query(`SELECT CASE WHEN OBJECT_ID(N'${schema}.${tableName}',N'U') IS NULL THEN 0 ELSE 1 END AS ok`))
@@ -215,6 +264,8 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           if (isTruncation) {
             console.warn("[importUpload] BULK INSERT truncation (valor >4000 chars), recriando staging NVARCHAR(MAX) upload=%s", uploadId);
             phaseTimings.importMethod = "tds-fallback-after-truncation";
+            // Staging is now NVARCHAR(MAX) — INSERT SELECT must use TRY_CONVERT
+            stagingIsTyped = false;
             await pool.request().query(
               `IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL DROP TABLE ${staging};
                CREATE TABLE ${staging} (${colDefsMax})`,
@@ -241,7 +292,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
             tdsSource = await downloadFile(upload.blobName);
           }
 
-          total = await tdsBulkCopy(pool, tdsSource, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress);
+          total = await tdsBulkCopy(pool, tdsSource, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress, stagingIsTyped);
         }
       } else {
         // TDS path: small CSV or no blob storage configured
@@ -249,10 +300,20 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
         total = await tdsBulkCopy(pool, source, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress);
       }
     } else {
-      // Idempotent retry: staging already populated, just count what's there
+      // Idempotent retry: staging already populated, just count what's there.
+      // Detect whether staging was created as typed or NVARCHAR(MAX) (truncation fallback).
       const countRes = await pool.request().query(`SELECT COUNT_BIG(*) n FROM ${staging}`);
       total = Number(countRes.recordset[0].n);
       phaseTimings.importMethod = "idempotent-retry";
+      const nonNvarcharCol = mapping.find(c => !c.sqlType.startsWith("NVARCHAR") && c.sqlType !== "TEXT");
+      if (nonNvarcharCol) {
+        const colTypeRes = await pool.request().query(
+          `SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+           WHERE TABLE_SCHEMA='${schema}' AND TABLE_NAME='${stage}' AND COLUMN_NAME='${nonNvarcharCol.sqlName}'`
+        );
+        const dt = ((colTypeRes.recordset[0]?.DATA_TYPE as string | undefined) ?? "").toUpperCase();
+        stagingIsTyped = dt !== "NVARCHAR";
+      }
     }
 
     // Index staging._cw_rh so NOT EXISTS lookups are O(n log n) instead of O(n²)
@@ -279,7 +340,11 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       (request as unknown as { timeout: number }).timeout = 0;
       const targetColDefs = typedColumnDefs(mapping);
       const colList = mapping.map(c => quoteIdentifier(c.sqlName)).join(",");
-      const typedSelect = mapping.map(c => typedSelectExpr(c, "s")).join(",");
+      // Typed staging: staging already has correct types — direct column copy, no TRY_CONVERT
+      // NVARCHAR(MAX) staging (truncation fallback): must use TRY_CONVERT to cast strings to types
+      const typedSelect = stagingIsTyped
+        ? mapping.map(c => `s.${quoteIdentifier(c.sqlName)}`).join(",")
+        : mapping.map(c => typedSelectExpr(c, "s")).join(",");
 
       if (phase2) {
         // Phase 2: new rows already BULK inserted into target.

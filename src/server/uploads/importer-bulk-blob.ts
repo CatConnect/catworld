@@ -9,6 +9,7 @@ import {
 import { sqlPool } from "@/server/azure/sql";
 import { quoteIdentifier } from "@/server/security/naming";
 import { rowsFromFile, type ParsedColumn, type RowsFromFileOpts } from "./parser";
+import { normalizeDateLike } from "./date-normalize";
 import { env } from "@/server/env";
 
 export type BulkBlobResult = {
@@ -37,6 +38,44 @@ export function sanitizeCsvField(v: unknown): string {
     .replace(/[\n\r\t]/g, " ")
     .replace(/\|/g, " ");
   return '"' + sanitized + '"';
+}
+
+/**
+ * Emit a CSV field already converted to the target SQL type.
+ * Numeric/date types are written unquoted (SQL Server parses them natively during BULK INSERT);
+ * empty/invalid values are written as empty (= NULL via KEEPNULLS).
+ * NVARCHAR falls through to sanitizeCsvField.
+ *
+ * The _cw_rh row hash is always computed from sanitizeCsvField output (backward-compatible),
+ * NOT from this function — so delta-replace hash comparisons stay correct across deploys.
+ */
+export function typedCsvField(v: unknown, sqlType: string): string {
+  const raw = v == null ? "" : String(v).trim();
+  if (!raw) return sqlType.startsWith("NVARCHAR") ? '""' : "";
+
+  if (sqlType === "BIGINT") {
+    // Only accept pure integers — mirrors TRY_CONVERT(BIGINT) which rejects thousands-separator formats
+    if (!/^-?\d+$/.test(raw)) return "";
+    return raw;
+  }
+  if (sqlType.startsWith("DECIMAL")) {
+    // BR format: "1.234,56" → "1234.5600"
+    const s = raw.includes(",") ? raw.replaceAll(".", "").replace(",", ".") : raw;
+    const n = Number.parseFloat(s);
+    return isNaN(n) ? "" : n.toFixed(4);
+  }
+  if (sqlType === "DATE") {
+    const d = normalizeDateLike(raw);
+    return d ? d.slice(0, 10) : ""; // YYYY-MM-DD
+  }
+  if (sqlType === "DATETIME2") {
+    const d = normalizeDateLike(raw);
+    return d ? d.replace("T", " ").replace("Z", "").slice(0, 23) : "";
+  }
+  if (sqlType === "TIME") {
+    return /^\d{1,2}:\d{2}(:\d{2})?$/.test(raw) ? raw : "";
+  }
+  return sanitizeCsvField(v);
 }
 
 export async function bulkInsertFromBlob(
@@ -98,8 +137,12 @@ export async function bulkInsertFromBlob(
       }
     } else {
       for await (const row of rowsFromFile(source, mapping, opts)) {
-        const csvLine = mapping.map(c => sanitizeCsvField(row[c.sqlName])).join("|");
-        const rowHash = createHash("md5").update(csvLine).digest("hex");
+        // Hash uses sanitizeCsvField (stable across deploys — hash must match existing target rows)
+        const hashLine = mapping.map(c => sanitizeCsvField(row[c.sqlName])).join("|");
+        const rowHash  = createHash("md5").update(hashLine).digest("hex");
+        // CSV content uses pre-converted types so BULK INSERT writes to typed staging columns
+        // without any TRY_CONVERT work on Azure SQL (shifts CPU from DTU-limited SQL to Node.js)
+        const csvLine = mapping.map(c => typedCsvField(row[c.sqlName], c.sqlType)).join("|");
         passThrough.write(csvLine + "|" + rowHash + "\n");
         total++;
         if (total % 50_000 === 0) onProgress?.(total);
@@ -148,6 +191,7 @@ export async function bulkInsertFromBlob(
         ROWTERMINATOR = '\n',
         FIELDQUOTE = '"',
         FIRSTROW = 1,
+        KEEPNULLS,
         TABLOCK,
         CODEPAGE = '65001',
         ROWS_PER_BATCH = 50000
