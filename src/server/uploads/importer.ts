@@ -241,11 +241,28 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       phaseTimings.importMethod = "idempotent-retry";
     }
 
+    // Index staging._cw_rh so NOT EXISTS lookups are O(n log n) instead of O(n²)
+    if (!stagingHasData) {
+      await pool.request().query(
+        `IF OBJECT_ID(N'${schema}.${stage}',N'U') IS NOT NULL
+           CREATE NONCLUSTERED INDEX [IX_stage_rh] ON ${staging} ([_cw_rh])`,
+      );
+    }
+    // Ensure target also has the _cw_rh index (older tables may predate it)
+    if (deltaReplace && targetExists) {
+      await pool.request().query(
+        `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID(N'${schema}.${tableName}') AND name=N'IX__cw_rh')
+           CREATE NONCLUSTERED INDEX [IX__cw_rh] ON ${target} ([_cw_rh])`,
+      );
+    }
+
     // ── Atomic transaction ─────────────────────────────────────────────────────
     const tx = new sql.Transaction(pool);
     await tx.begin();
     try {
       const request = new sql.Request(tx);
+      // No timeout for import transactions — file size is unbounded
+      (request as unknown as { timeout: number }).timeout = 0;
       const targetColDefs = typedColumnDefs(mapping);
       const colList = mapping.map(c => quoteIdentifier(c.sqlName)).join(",");
       const typedSelect = mapping.map(c => typedSelectExpr(c, "s")).join(",");
