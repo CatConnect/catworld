@@ -14,15 +14,17 @@ export const dynamic = "force-dynamic";
 const PAGE_SIZE = 50;
 const CANCELLABLE = ["PENDING_UPLOAD", "QUEUED_PREVIEW", "AWAITING_CONFIRMATION", "QUEUED_IMPORT", "RETRYING"];
 
-const STATUS_LABELS: Record<string, string> = {
-  PENDING_UPLOAD: "Aguardando upload",
-  QUEUED_PREVIEW: "Na fila de análise",
-  AWAITING_CONFIRMATION: "Aguardando confirmação",
-  QUEUED_IMPORT: "Na fila de importação",
-  RETRYING: "Tentando novamente",
-  COMPLETED: "Concluído",
-  FAILED: "Falhou",
+const GROUP_STATUSES: Record<string, string[]> = {
+  pending:   ["PENDING_UPLOAD", "QUEUED_PREVIEW", "AWAITING_CONFIRMATION"],
+  active:    ["PREVIEWING", "QUEUED_IMPORT", "IMPORTING", "RETRYING"],
+  completed: ["COMPLETED"],
+  failed:    ["FAILED"],
 };
+
+function parseComma(value: string | undefined): string[] {
+  if (!value) return [];
+  return value.split(",").map((s) => s.trim()).filter(Boolean);
+}
 
 export default async function UploadsPage({
   searchParams,
@@ -30,17 +32,21 @@ export default async function UploadsPage({
   searchParams: Promise<Record<string, string | undefined>>;
 }) {
   const params = await searchParams;
-  const status = params.status ?? "";
-  const projectId = params.projectId ?? "";
-  const page = Math.max(1, parseInt(params.page ?? "1", 10));
-  const skip = (page - 1) * PAGE_SIZE;
+
+  const selectedStatuses  = parseComma(params.status);
+  const selectedProjectIds = parseComma(params.projectId);
+  const page  = Math.max(1, parseInt(params.page ?? "1", 10));
+  const skip  = (page - 1) * PAGE_SIZE;
+
+  // Expand selected status groups into DB status values
+  const dbStatuses = selectedStatuses.flatMap((g) => GROUP_STATUSES[g] ?? []);
 
   const where = {
-    ...(status ? { status } : {}),
-    ...(projectId ? { dataset: { projectId } } : {}),
+    ...(dbStatuses.length  ? { status:   { in: dbStatuses } } : {}),
+    ...(selectedProjectIds.length ? { dataset: { projectId: { in: selectedProjectIds } } } : {}),
   };
 
-  const [uploads, total, projects, queued, funnelRaw] = await Promise.all([
+  const [uploads, total, projects, queued, funnelRaw, allStatusCounts] = await Promise.all([
     prisma.upload.findMany({
       where,
       orderBy: { createdAt: "desc" },
@@ -52,11 +58,22 @@ export default async function UploadsPage({
     prisma.project.findMany({ where: { active: true }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
     prisma.upload.count({ where: { status: { in: CANCELLABLE } } }),
     prisma.upload.groupBy({ by: ["status"], where, _count: true }),
+    // Unfiltered counts — for badge numbers on each status chip
+    prisma.upload.groupBy({ by: ["status"], _count: true }),
   ]);
 
   const funnelCounts = countFunnelGroups(
     funnelRaw.flatMap((r) => Array(r._count).fill(r.status) as string[]),
   );
+
+  // Count per group key from unfiltered totals
+  const statusCountMap = Object.fromEntries(allStatusCounts.map((r) => [r.status, r._count]));
+  const groupCounts = {
+    pending:   (GROUP_STATUSES.pending!).reduce((n, s) => n + (statusCountMap[s] ?? 0), 0),
+    active:    (GROUP_STATUSES.active!).reduce((n, s) => n + (statusCountMap[s] ?? 0), 0),
+    completed: statusCountMap["COMPLETED"] ?? 0,
+    failed:    statusCountMap["FAILED"] ?? 0,
+  };
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
 
@@ -76,9 +93,9 @@ export default async function UploadsPage({
           <Suspense fallback={<div className="flex gap-2"><div className="skeleton h-8 w-32 rounded-lg" /><div className="skeleton h-8 w-36 rounded-lg" /></div>}>
             <UploadFilters
               projects={projects}
-              currentStatus={status}
-              currentProjectId={projectId}
-              statusLabels={STATUS_LABELS}
+              selectedStatuses={selectedStatuses}
+              selectedProjectIds={selectedProjectIds}
+              groupCounts={groupCounts}
             />
           </Suspense>
           <p className="shrink-0 text-xs text-base-content/50">

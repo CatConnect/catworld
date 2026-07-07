@@ -129,7 +129,11 @@ export function UploadFlow({
 
         // 3) Notify uploaded — if browser preview was set, server skips PREVIEW_UPLOAD
         //    and queues IMPORT_UPLOAD directly (no poll for preview needed)
-        await fetch(`/api/v1/uploads/${uploadId}?action=uploaded`, { method: "POST" });
+        const notifyRes = await fetch(`/api/v1/uploads/${uploadId}?action=uploaded`, { method: "POST" });
+        if (!notifyRes.ok) {
+          const errBody = await notifyRes.text().catch(() => "");
+          throw new Error(`Falha ao notificar upload concluído (${notifyRes.status})${errBody ? `: ${errBody}` : ""}`);
+        }
 
         update({ status: "importing", statusLabel: "Importando..." });
 
@@ -346,6 +350,18 @@ async function pollForPreview(
   throw new Error("Tempo de processamento excedido");
 }
 
+const STATUS_LABELS: Record<string, string> = {
+  PENDING_UPLOAD: "Aguardando upload...",
+  PENDING_BLOB: "Armazenando arquivo...",
+  QUEUED_PREVIEW: "Na fila de pré-visualização...",
+  PREVIEWING: "Gerando pré-visualização...",
+  PREVIEW_READY: "Pré-visualização pronta",
+  QUEUED_IMPORT: "Na fila de importação...",
+  IMPORTING: "Importando...",
+  COMPLETED: "Concluído",
+  FAILED: "Falhou",
+};
+
 async function pollForCompletion(
   uploadId: string,
   onStatus: (label: string) => void
@@ -354,7 +370,7 @@ async function pollForCompletion(
     const r = await fetch(`/api/v1/uploads/${uploadId}`);
     const b = await r.json();
     const u = b.data;
-    onStatus(u.status);
+    onStatus(STATUS_LABELS[u.status as string] ?? u.status);
     if (u.status === "COMPLETED") return;
     if (u.status === "FAILED") throw new Error(u.errorMessage ?? "Importação falhou");
     await new Promise((resolve) => setTimeout(resolve, 2000));
