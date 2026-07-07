@@ -76,6 +76,7 @@ export function UploadFlow({
       const update = (patch: Partial<FileJob>) =>
         setJobs((prev) => prev.map((j) => (j.id === job.id ? { ...j, ...patch } : j)));
 
+      let uploadId = "";
       try {
         // 0) Try browser-side preview with DuckDB-WASM (CSV only, XLSX falls back)
         update({ status: "previewing", statusLabel: "Analisando..." });
@@ -116,7 +117,7 @@ export function UploadFlow({
           return;
         }
 
-        const uploadId: string = b.data.upload.id;
+        uploadId = b.data.upload.id as string;
         update({ uploadId });
 
         // 2) Upload to blob
@@ -166,11 +167,28 @@ export function UploadFlow({
         update({ status: "completed", statusLabel: "Concluído" });
         oc();
       } catch (e) {
-        update({
-          status: "failed",
-          statusLabel: "Falhou",
-          error: e instanceof Error ? e.message : "Erro desconhecido",
-        });
+        // Before marking as failed locally, check the real DB status —
+        // a transient network/poll error might have thrown while the server completed normally.
+        let actuallyFailed = true;
+        if (uploadId) {
+          try {
+            const check = await fetch(`/api/v1/uploads/${uploadId}`);
+            if (check.ok) {
+              const body = await check.json() as { data?: { status?: string } };
+              if (body.data?.status === "COMPLETED") actuallyFailed = false;
+            }
+          } catch { /* ignore — show failed */ }
+        }
+        if (!actuallyFailed) {
+          update({ status: "completed", statusLabel: "Concluído" });
+          oc();
+        } else {
+          update({
+            status: "failed",
+            statusLabel: "Falhou",
+            error: e instanceof Error ? e.message : "Erro desconhecido",
+          });
+        }
       }
     };
 

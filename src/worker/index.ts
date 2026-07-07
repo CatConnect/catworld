@@ -61,7 +61,9 @@ async function work(job: Claimed) {
   }
 
   const heartbeat = setInterval(
-    () => void prisma.job.update({ where: { id: job.id }, data: { heartbeatAt: new Date() } }),
+    () => prisma.job.update({ where: { id: job.id }, data: { heartbeatAt: new Date() } }).catch(
+      (e) => console.warn("[heartbeat] falhou job=%s: %s", job.id, e instanceof Error ? e.message : e)
+    ),
     15000,
   );
 
@@ -179,7 +181,7 @@ async function recoverStale() {
          last_error='Worker crashed (stale heartbeat, max attempts reached)'
      WHERE status='RUNNING'
        AND heartbeat_at < CASE
-         WHEN type='IMPORT_UPLOAD' THEN DATEADD(MINUTE,-30,SYSUTCDATETIME())
+         WHEN type='IMPORT_UPLOAD' THEN DATEADD(MINUTE,-90,SYSUTCDATETIME())
          ELSE DATEADD(SECOND,-120,SYSUTCDATETIME())
        END
        AND attempts >= max_attempts`,
@@ -191,7 +193,7 @@ async function recoverStale() {
      SET status='QUEUED', locked_at=NULL, locked_by=NULL, heartbeat_at=NULL, available_at=SYSUTCDATETIME()
      WHERE status='RUNNING'
        AND heartbeat_at < CASE
-         WHEN type='IMPORT_UPLOAD' THEN DATEADD(MINUTE,-30,SYSUTCDATETIME())
+         WHEN type='IMPORT_UPLOAD' THEN DATEADD(MINUTE,-90,SYSUTCDATETIME())
          ELSE DATEADD(SECOND,-120,SYSUTCDATETIME())
        END
        AND attempts < max_attempts`,
