@@ -6,6 +6,7 @@ import { CancelQueueButton } from "@/components/dashboard/cancel-queue";
 import { UploadFilters } from "@/components/uploads/upload-filters";
 import { UploadCard } from "@/components/uploads/upload-card";
 import { UploadPagination } from "@/components/uploads/upload-pagination";
+import { UploadPoller } from "@/components/uploads/upload-poller";
 
 export const dynamic = "force-dynamic";
 
@@ -62,6 +63,7 @@ export default async function UploadsPage({
         actions={<CancelQueueButton queued={queued} />}
       />
 
+      <UploadPoller statuses={uploads.map((u) => u.status)} />
       <Panel>
         <div className="flex flex-col gap-4 border-b border-base-300 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
           <Suspense fallback={<div className="flex gap-2"><div className="skeleton h-8 w-32 rounded-lg" /><div className="skeleton h-8 w-36 rounded-lg" /></div>}>
