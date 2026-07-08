@@ -34,6 +34,7 @@ function blobEnv() {
 export function sanitizeCsvField(v: unknown): string {
   if (v == null || String(v).trim() === "") return '""';
   const sanitized = String(v)
+    .replace(/\x00/g, "")   // null bytes → invalid for BULK INSERT CODEPAGE=65001
     .replace(/"/g, '""')
     .replace(/[\n\r\t]/g, " ")
     .replace(/\|/g, " ");
@@ -59,10 +60,18 @@ export function typedCsvField(v: unknown, sqlType: string): string {
     return raw;
   }
   if (sqlType.startsWith("DECIMAL")) {
-    // BR format: "1.234,56" → "1234.5600"
-    const s = raw.includes(",") ? raw.replaceAll(".", "").replace(",", ".") : raw;
+    // Detect separator by which comes last: comma → BR (1.234,56), dot → US/neutral (1,234.56)
+    const lastDot = raw.lastIndexOf(".");
+    const lastComma = raw.lastIndexOf(",");
+    let s: string;
+    if (lastComma > lastDot) {
+      s = raw.replaceAll(".", "").replace(",", "."); // BR: strip dots, comma→dot
+    } else {
+      s = raw.replaceAll(",", ""); // US/neutral: strip commas, dot is decimal
+    }
     const n = Number.parseFloat(s);
-    return isNaN(n) ? "" : n.toFixed(4);
+    if (!Number.isFinite(n)) return ""; // NaN or Infinity → NULL
+    return n.toFixed(4);
   }
   if (sqlType === "DATE") {
     const d = normalizeDateLike(raw);
