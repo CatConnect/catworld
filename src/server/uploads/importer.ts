@@ -386,7 +386,29 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
         } else {
           // TDS path: small CSV or no blob storage configured
           phaseTimings.importMethod = smallCsv ? "tds-small-csv" : "tds-primary";
-          total = await tdsBulkCopy(pool, source, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress);
+          try {
+            total = await tdsBulkCopy(pool, source, mapping, schema, destTable, opts, knownRowCount, uploadId, onProgress);
+          } catch (tdsErr) {
+            const tdsMsg = tdsErr instanceof Error ? tdsErr.message : String(tdsErr);
+            // 4815 = BCP protocol error (bad value mid-stream); fall back to blob-bulk if storage is available
+            const isBcpErr = tdsMsg.includes("4815") || tdsMsg.toLowerCase().includes("bcp");
+            if (!isBcpErr || !env().CATWORLD_AZURE_BLOB_CONNECTION_STRING) throw tdsErr;
+
+            console.warn("[importUpload] TDS 4815 — falling back to blob-bulk upload=%s", uploadId);
+            phaseTimings.importMethod = "blob-bulk-after-tds-4815";
+            await pool.request().query(`TRUNCATE TABLE ${staging}`).catch(() => {});
+
+            const { downloadFile } = await import("@/server/storage");
+            let blobSrc: NodeJS.ReadableStream;
+            try { blobSrc = await downloadFile(`originals/${upload.id}${ext}`); }
+            catch { blobSrc = await downloadFile(upload.blobName); }
+
+            const blobResult = await bulkInsertFromBlob(
+              uploadId, blobSrc, mapping, schema, destTable, opts, onProgress, false, knownRowCount,
+            );
+            total = blobResult.total;
+            phaseTimings.bulkBlob = blobResult;
+          }
         }
       } else {
         // Idempotent retry: staging already populated, just count what's there.
