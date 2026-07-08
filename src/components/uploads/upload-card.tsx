@@ -5,7 +5,8 @@ import { useRouter } from "next/navigation";
 import { CheckCircle2, CircleAlert, CircleX, Clock3, Loader2, X } from "lucide-react";
 import type { Upload, Dataset, Project } from "@prisma/client";
 
-type UploadWithDataset = Upload & { dataset: (Dataset & { project: Project }) | null };
+type JobSummary = { lockedBy: string | null; status: string; weight: number; attempts: number; maxAttempts: number };
+type UploadWithDataset = Upload & { dataset: (Dataset & { project: Project }) | null; jobs: JobSummary[] };
 
 function fmtBytes(n: bigint | number) {
   const v = Number(n);
@@ -40,6 +41,7 @@ const STATUS_CONFIG: Record<string, { cls: string; icon: React.ElementType; labe
   AWAITING_CONFIRMATION:  { cls: "badge-warning",  icon: CircleAlert,  label: "Aguardando confirmação" },
   QUEUED_PREVIEW:         { cls: "badge-info",     icon: Loader2,      label: "Analisando" },
   QUEUED_IMPORT:          { cls: "badge-info",     icon: Loader2,      label: "Importando" },
+  IMPORTING:              { cls: "badge-info",     icon: Loader2,      label: "Importando" },
   RETRYING:               { cls: "badge-warning",  icon: Loader2,      label: "Tentando novamente" },
   PENDING_UPLOAD:         { cls: "badge-ghost",    icon: Clock3,       label: "Aguardando upload" },
 };
@@ -58,7 +60,7 @@ export function UploadCard({ upload }: { upload: UploadWithDataset }) {
 
   const cfg = STATUS_CONFIG[upload.status] ?? { cls: "badge-ghost", icon: Clock3, label: upload.status };
   const Icon = cfg.icon;
-  const isInProgress = ["QUEUED_PREVIEW", "QUEUED_IMPORT", "RETRYING"].includes(upload.status);
+  const isInProgress = ["QUEUED_PREVIEW", "QUEUED_IMPORT", "IMPORTING", "RETRYING"].includes(upload.status);
   const canCancel = CANCELLABLE.has(upload.status);
 
   const handleCancel = async () => {
@@ -72,6 +74,10 @@ export function UploadCard({ upload }: { upload: UploadWithDataset }) {
     }
   };
 
+  const job = upload.jobs[0] ?? null;
+  const workerSlot = job?.lockedBy
+    ? job.lockedBy.replace(/^.+-(\d+)$/, "slot $1")
+    : null;
   const ds = upload.dataset;
   const destination = ds
     ? ds.project?.name
@@ -110,6 +116,18 @@ export function UploadCard({ upload }: { upload: UploadWithDataset }) {
           )}
           <span>·</span>
           <span>{fmtRelative(upload.createdAt)}</span>
+          {workerSlot && upload.status === "IMPORTING" && (
+            <>
+              <span>·</span>
+              <span className="text-accent" title={job?.lockedBy ?? ""}>⚙ {workerSlot}</span>
+            </>
+          )}
+          {job && ["IMPORTING", "RETRYING", "QUEUED_IMPORT"].includes(upload.status) && job.attempts > 0 && (
+            <>
+              <span>·</span>
+              <span title="Tentativas">tentativa {job.attempts}/{job.maxAttempts}</span>
+            </>
+          )}
           {(upload.status === "COMPLETED" || upload.status === "FAILED") && (
             <>
               <span>·</span>

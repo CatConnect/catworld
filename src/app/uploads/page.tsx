@@ -52,7 +52,7 @@ export default async function UploadsPage({
       orderBy: { createdAt: "desc" },
       take: PAGE_SIZE,
       skip,
-      include: { dataset: { include: { project: true } } },
+      include: { dataset: { include: { project: true } }, jobs: { orderBy: { createdAt: "desc" }, take: 1, select: { lockedBy: true, status: true, weight: true, attempts: true, maxAttempts: true } } },
     }),
     prisma.upload.count({ where }),
     prisma.project.findMany({ where: { active: true }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
