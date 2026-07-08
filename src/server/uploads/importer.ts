@@ -91,7 +91,12 @@ function convertForTds(v: unknown, sqlType: string): unknown {
   }
   if (sqlType === "DATE" || sqlType === "DATETIME2") {
     const d = normalizeDateLike(s);
-    return d ? new Date(d) : null;
+    if (!d) return null;
+    // Ensure proper ISO 8601: space→T, truncate fractional seconds to 3 digits
+    // (SQL Server exports "2023-01-15 08:30:00.0000000" which V8 may reject)
+    const iso = d.replace(" ", "T").replace(/(\.\d{3})\d+/, "$1");
+    const date = new Date(iso);
+    return isNaN(date.getTime()) ? null : date;
   }
   if (sqlType === "TIME") {
     // mssql sql.Time requires a Date object — passing a string throws "Invalid time."
