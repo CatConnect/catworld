@@ -228,9 +228,22 @@ async function loop(concurrencyId: number) {
   }
 }
 
+async function releaseSelf() {
+  const workerId = env().CATWORLD_WORKER_ID;
+  const concurrency = env().CATWORLD_WORKER_CONCURRENCY;
+  const labels = Array.from({ length: concurrency }, (_, i) => `'${workerId}-${i + 1}'`).join(",");
+  const released = await prisma.$executeRawUnsafe(
+    `UPDATE dbo.cw_jobs
+     SET status='QUEUED', locked_at=NULL, locked_by=NULL, heartbeat_at=NULL, available_at=SYSUTCDATETIME()
+     WHERE status='RUNNING' AND locked_by IN (${labels})`,
+  );
+  if (released > 0) console.log(`[worker] startup: ${released} job(s) do worker anterior liberados`);
+}
+
 async function main() {
   const concurrency = env().CATWORLD_WORKER_CONCURRENCY;
   console.log(`Catworld worker ${env().CATWORLD_WORKER_ID} iniciado (concorrência: ${concurrency})`);
+  await releaseSelf();
   let lastRecovery = 0;
   const recoveryLoop = async () => {
     while (!stopping) {
