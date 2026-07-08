@@ -74,8 +74,8 @@ function convertForTds(v: unknown, sqlType: string): unknown {
     try {
       const b = BigInt(s);
       // SQL Server BIGINT is signed 64-bit: -(2^63) to 2^63-1
-      if (b < -9223372036854775808n || b > 9223372036854775807n) return null;
-      return Number(b); // mssql BigInt type accepts JS number within safe range
+      if (b < 0n || b > 9223372036854775807n) return null; // tedious BigInt handler requires >= 0n
+      return Number(b);
     } catch { return null; }
   }
   if (sqlType.startsWith("DECIMAL")) {
@@ -103,7 +103,8 @@ function convertForTds(v: unknown, sqlType: string): unknown {
     const d = new Date(1970, 0, 1, h, m, se, ms);
     return isNaN(d.getTime()) ? null : d;
   }
-  return s || null;
+  // Strip null bytes — they can corrupt the TDS BCP stream (error 4815)
+  return s.replace(/\x00/g, "") || null;
 }
 
 // ─── TDS bulk copy ────────────────────────────────────────────────────────────
