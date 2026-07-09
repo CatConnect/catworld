@@ -30,7 +30,8 @@ function blobEnv() {
 
 /** Sanitize a single value for NVARCHAR bulk-insert CSV output.
  *  Escapes double-quotes, replaces control characters with space,
- *  and wraps in double-quotes. Returns '""' for null/empty. */
+ *  and wraps in double-quotes. Returns '""' for null/empty.
+ *  Used ONLY for row-hash computation (_cw_rh) — hash must stay stable across deploys. */
 export function sanitizeCsvField(v: unknown): string {
   if (v == null || String(v).trim() === "") return '""';
   const sanitized = String(v)
@@ -42,10 +43,27 @@ export function sanitizeCsvField(v: unknown): string {
 }
 
 /**
+ * Encode an NVARCHAR value for the clean blob using tilde (~) as the FIELDQUOTE character.
+ * JSON values contain many '"' chars which, when doubled for FIELDQUOTE='"', can hit SQL Server's
+ * CSV parser buffer limit (error 4864). Tilde never appears in JSON, so no escaping is needed
+ * for typical text/JSON data, and the field stays compact.
+ * FIELDQUOTE in the BULK INSERT statement must be '~' to match.
+ */
+function nvarcharForBulk(v: unknown): string {
+  if (v == null || String(v).trim() === "") return ""; // unquoted empty → NULL via KEEPNULLS
+  const sanitized = String(v)
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "") // C0/DEL control chars
+    .replace(/~/g, "~~")          // escape tilde for FIELDQUOTE='~'
+    .replace(/[\n\r\t]/g, " ")   // newlines/tabs → space (preserve row structure)
+    .replace(/\|/g, " ");        // field delimiter → space
+  return "~" + sanitized + "~";
+}
+
+/**
  * Emit a CSV field already converted to the target SQL type.
  * Numeric/date types are written unquoted (SQL Server parses them natively during BULK INSERT);
  * empty/invalid values are written as empty (= NULL via KEEPNULLS).
- * NVARCHAR falls through to sanitizeCsvField.
+ * NVARCHAR uses tilde quoting (FIELDQUOTE='~') to avoid SQL Server CSV parser limits on '"'.
  *
  * The _cw_rh row hash is always computed from sanitizeCsvField output (backward-compatible),
  * NOT from this function — so delta-replace hash comparisons stay correct across deploys.
@@ -92,7 +110,7 @@ export function typedCsvField(v: unknown, sqlType: string): string {
     if (Number(m[1]) > 23 || Number(m[2]) > 59) return "";
     return raw;
   }
-  return sanitizeCsvField(v);
+  return nvarcharForBulk(v);
 }
 
 export async function bulkInsertFromBlob(
@@ -206,7 +224,7 @@ export async function bulkInsertFromBlob(
         FORMAT = 'CSV',
         FIELDTERMINATOR = '|',
         ROWTERMINATOR = '\n',
-        FIELDQUOTE = '"',
+        FIELDQUOTE = '~',
         FIRSTROW = 1,
         KEEPNULLS,
         TABLOCK,
