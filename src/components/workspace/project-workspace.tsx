@@ -1,6 +1,6 @@
 "use client";
 import { useMemo, useState } from "react";
-import { ChevronRight, Database, FolderOpen, Search, Table2 } from "lucide-react";
+import { Cable, ChevronRight, Database, DatabaseZap, FolderOpen, Search, Table2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { CopyableId } from "@/components/ui/copyable-id";
 import { CreateCatalogDialog } from "@/components/management/create-catalog-dialog";
@@ -39,7 +39,7 @@ export function ProjectWorkspace({ project }: { project: Project }) {
     <div className="grid gap-6 xl:grid-cols-[280px_1fr]">
       <div className="rounded-box border border-base-300 bg-base-100">
         <div className="border-b border-base-300 p-3">
-          <label className="input input-sm flex items-center gap-2"><Search size={14} className="text-base-content/45" /><input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Buscar dataset ou tabela..." className="grow" /></label>
+          <label className="input input-sm flex items-center gap-2"><Search size={14} className="text-base-content/45" /><span className="sr-only">Buscar dataset ou tabela</span><input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Buscar dataset ou tabela..." className="grow" /></label>
         </div>
         <div className="p-2">
           <button onClick={() => setSelection({ kind: "query" })} className={`mb-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm ${selection.kind === "query" ? "bg-primary text-primary-content" : "hover:bg-base-200"}`}>
@@ -56,7 +56,7 @@ export function ProjectWorkspace({ project }: { project: Project }) {
                 <div className="ml-6 space-y-0.5 border-l border-base-300 pl-2">
                   {d.tables.map((t) => (
                     <button key={t.id} onClick={() => setSelection({ kind: "table", datasetId: d.id, tableId: t.id })} className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs ${selection.kind === "table" && selection.tableId === t.id ? "bg-primary/15 font-medium text-primary" : "text-base-content/70 hover:bg-base-200"}`}>
-                      <Table2 size={13} />{t.name}
+                      {t.source?.mode === "live" ? <Cable size={13} /> : t.source?.mode === "extract" ? <DatabaseZap size={13} /> : <Table2 size={13} />}{t.name}
                     </button>
                   ))}
                   {d.tables.length === 0 && <p className="px-2 py-1 text-xs text-base-content/40">Sem tabelas</p>}

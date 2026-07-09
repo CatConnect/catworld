@@ -29,7 +29,7 @@ export function Button({ children, variant = "primary", className = "", ...props
 export function Panel({ children, className = "", title, action }: { children: ReactNode; className?: string; title?: string; action?: ReactNode }) {
   return (
     <section className={`min-w-0 rounded-box border border-base-300 bg-base-100 shadow-sm ${className}`}>
-      {(title || action) && <div className="flex items-center justify-between border-b border-base-300 px-5 py-4"><h2 className="font-semibold">{title}</h2>{action}</div>}
+      {(title || action) && <div className="flex items-center justify-between gap-3 border-b border-base-300 px-5 py-4"><h2 className="font-semibold">{title}</h2>{action}</div>}
       {children}
     </section>
   );
