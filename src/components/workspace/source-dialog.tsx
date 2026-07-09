@@ -26,6 +26,8 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
   const [tables, setTables] = useState<TableRow[]>([]);
   const [selectedTables, setSelectedTables] = useState<string[]>([]);
   const [columns, setColumns] = useState<Column[]>([]);
+  const [queryTestedSql, setQueryTestedSql] = useState("");
+  const [queryStatus, setQueryStatus] = useState<"idle" | "ok" | "error">("idle");
   const [sourceKind, setSourceKind] = useState<"table" | "query">("table");
   const [mode, setMode] = useState<"extract" | "live">("extract");
   const [refreshPolicy, setRefreshPolicy] = useState("manual");
@@ -36,7 +38,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
   const [error, setError] = useState("");
 
   async function open() {
-    setStep("origin"); setError(""); setColumns([]); setSelectedTables([]);
+    setStep("origin"); setError(""); setColumns([]); setSelectedTables([]); setQueryStatus("idle"); setQueryTestedSql("");
     ref.current?.showModal();
     setLoadingMeta(true);
     const response = await fetch("/api/v1/connections");
@@ -74,13 +76,24 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
   async function preview() {
     if (!connectionId) return;
     if (sourceKind === "table") { setColumns([]); setStep("preview"); return; }
-    setLoading(true); setError("");
+    if (queryStatus !== "ok" || queryTestedSql !== sourceSql) {
+      const ok = await testQuery();
+      if (!ok) return;
+    }
+    setStep("preview");
+  }
+
+  async function testQuery() {
+    if (!connectionId || sourceKind !== "query") return false;
+    setLoading(true); setError(""); setQueryStatus("idle");
     const response = await fetch(`/api/v1/connections/${connectionId}/columns?sql=${encodeURIComponent(sourceSql)}`);
     const body = await response.json();
     setLoading(false);
-    if (!response.ok) { setError(body.error?.message ?? "Falha ao ler colunas"); return; }
+    if (!response.ok) { setColumns([]); setQueryStatus("error"); setError(body.error?.message ?? "Falha ao testar consulta"); return false; }
     setColumns(body.data ?? []);
-    setStep("preview");
+    setQueryTestedSql(sourceSql);
+    setQueryStatus("ok");
+    return true;
   }
 
   async function create() {
@@ -116,7 +129,8 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
     }
   }
 
-  const canChooseOrigin = connectionId && (sourceKind === "table" ? selectedTables.length > 0 : queryName.trim() && sourceSql.trim());
+  const queryIsReady = queryName.trim() && sourceSql.trim() && queryStatus === "ok" && queryTestedSql === sourceSql;
+  const canChooseOrigin = connectionId && (sourceKind === "table" ? selectedTables.length > 0 : queryIsReady);
   const modeLabel = mode === "extract" ? "Copiar para o Catworld" : "Consultar direto no Postgres";
 
   return (
@@ -154,7 +168,14 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
                 ) : (
                   <>
                     <Field label="Nome da tabela no Catworld" hint="Obrigatorio para fontes criadas por consulta."><input className="input w-full" value={queryName} onChange={(e) => setQueryName(e.target.value)} /></Field>
-                    <Field label="Consulta SQL" hint="Somente SELECT ou WITH. A consulta roda no Postgres da conexao escolhida." wide><textarea className="textarea h-44 w-full font-mono text-sm" value={sourceSql} onChange={(e) => setSourceSql(e.target.value)} /></Field>
+                    <Field label="Consulta SQL" hint="Somente SELECT ou WITH. A consulta roda no Postgres da conexao escolhida." wide><textarea className="textarea h-44 w-full font-mono text-sm" value={sourceSql} onChange={(e) => { setSourceSql(e.target.value); setQueryStatus("idle"); }} /></Field>
+                    <div className="lg:col-span-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button type="button" className="btn btn-outline btn-sm" onClick={testQuery} disabled={loading || !connectionId || !sourceSql.trim()}><Play size={14} />{loading ? "Testando..." : "Testar consulta"}</button>
+                        {queryStatus === "ok" && <span className="badge badge-success badge-outline">{columns.length} coluna(s) encontrada(s)</span>}
+                      </div>
+                      {columns.length > 0 && queryStatus === "ok" && <div className="mt-3 max-h-44 overflow-auto rounded-box border border-base-300"><table className="table table-sm"><thead><tr><th>Coluna</th><th>Nome no Catworld</th><th>Tipo</th></tr></thead><tbody>{columns.map((c) => <tr key={c.sqlName}><td>{c.originalName}</td><td className="font-mono text-xs">{c.sqlName}</td><td>{c.sqlType}</td></tr>)}</tbody></table></div>}
+                    </div>
                   </>
                 )}
               </div>
@@ -178,7 +199,7 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
 
           <div className="modal-action justify-between">
             <div>{step !== "origin" && <button type="button" className="btn btn-ghost btn-sm" onClick={() => setStep(step === "preview" ? "mode" : "origin")}>Voltar</button>}</div>
-            <div className="flex gap-2"><button type="button" onClick={() => ref.current?.close()} className="btn btn-ghost btn-sm">Fechar</button>{step === "origin" && <button type="button" disabled={!canChooseOrigin} className="btn btn-primary btn-sm" onClick={() => setStep("mode")}>Continuar</button>}{step === "mode" && <button type="button" disabled={loading} className="btn btn-primary btn-sm" onClick={preview}><RefreshCw size={14} />{loading ? "Carregando..." : "Gerar previa"}</button>}{step === "preview" && <button type="button" onClick={create} disabled={loading || (sourceKind === "query" && columns.length === 0)} className="btn btn-primary btn-sm">{loading ? "Criando..." : "Criar fonte(s)"}</button>}</div>
+            <div className="flex gap-2"><button type="button" onClick={() => ref.current?.close()} className="btn btn-ghost btn-sm">Fechar</button>{step === "origin" && <button type="button" disabled={!canChooseOrigin} className="btn btn-primary btn-sm" onClick={() => setStep("mode")}>Continuar</button>}{step === "mode" && <button type="button" disabled={loading} className="btn btn-primary btn-sm" onClick={preview}><RefreshCw size={14} />{loading ? "Carregando..." : sourceKind === "query" ? "Revisar consulta" : "Gerar previa"}</button>}{step === "preview" && <button type="button" onClick={create} disabled={loading || (sourceKind === "query" && columns.length === 0)} className="btn btn-primary btn-sm">{loading ? "Criando..." : "Criar fonte(s)"}</button>}</div>
           </div>
         </div>
         <form method="dialog" className="modal-backdrop"><button>fechar</button></form>

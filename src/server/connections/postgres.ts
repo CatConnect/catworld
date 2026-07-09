@@ -1,4 +1,4 @@
-import { Client, type ClientConfig } from "pg";
+import { Client, type ClientConfig, type QueryConfig, type QueryResult } from "pg";
 import { decryptSecret } from "@/server/security/crypto";
 import { validateReadOnlySql } from "@/server/security/sql-safety";
 import { ApiError } from "@/server/http";
@@ -109,7 +109,7 @@ export async function tableColumns(connection: PgConnection, schema: string, tab
 export async function queryColumns(connection: PgConnection, query: string): Promise<SourceColumn[]> {
   const statement = safeStatement(query);
   return withPg(connection, async (client) => {
-    const result = await client.query({ text: `SELECT * FROM (${statement}) cw_source_probe LIMIT 0`, rowMode: "array" });
+    const result = await pgQuery(client, `SELECT * FROM (${statement}) cw_source_probe LIMIT 0`);
     return (result.fields ?? []).map((field) => ({
       originalName: field.name,
       sqlName: sqlIdentifier(field.name),
@@ -125,7 +125,7 @@ export async function executePostgresReadOnly(connection: PgConnection, query: s
   return withPg(connection, async (client) => {
     await client.query(`SET statement_timeout TO ${Math.min(Math.max(timeout, 1), 120) * 1000}`);
     const started = Date.now();
-    const result = await client.query(`SELECT * FROM (${statement}) cw_live_result LIMIT ${Math.min(Math.max(limit, 1), 10000) + 1}`);
+    const result = await pgQuery(client, `SELECT * FROM (${statement}) cw_live_result LIMIT ${Math.min(Math.max(limit, 1), 10000) + 1}`);
     const rows = result.rows.slice(0, limit) as Record<string, unknown>[];
     return {
       columns: result.fields.map((f) => f.name),
@@ -144,7 +144,7 @@ export async function* streamPostgresRows(connection: PgConnection, query: strin
   try {
     let offset = 0;
     while (true) {
-      const result = await client.query(`SELECT * FROM (${statement}) cw_extract_result LIMIT ${batchSize} OFFSET ${offset}`);
+      const result = await pgQuery(client, `SELECT * FROM (${statement}) cw_extract_result LIMIT ${batchSize} OFFSET ${offset}`);
       if (!result.rows.length) break;
       yield result.rows as Record<string, unknown>[];
       if (result.rows.length < batchSize) break;
@@ -163,6 +163,23 @@ export function safeStatement(query: string) {
 
 export function quotedPgTable(schema: string, table: string) {
   return `"${schema.replaceAll('"', '""')}"."${table.replaceAll('"', '""')}"`;
+}
+
+async function pgQuery<T extends Record<string, unknown> = Record<string, unknown>>(client: Client, query: string | QueryConfig): Promise<QueryResult<T>> {
+  try {
+    return await client.query<T>(query);
+  } catch (error) {
+    throw postgresError(error);
+  }
+}
+
+function postgresError(error: unknown) {
+  if (error instanceof ApiError) return error;
+  if (error instanceof Error && "code" in error) {
+    const code = typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "POSTGRES_ERROR";
+    return new ApiError(400, "POSTGRES_QUERY_FAILED", error.message, { postgresCode: code });
+  }
+  return error;
 }
 
 function mapPgType(row: { data_type: string; udt_name: string; numeric_precision: number | null; numeric_scale: number | null }) {
