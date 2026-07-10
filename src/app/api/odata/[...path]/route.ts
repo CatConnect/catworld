@@ -198,7 +198,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
     // Service document — não executa SQL, não precisa de syncActorGrants
     if (rest.length === 0) {
-      return Response.json(buildServiceDocument(baseUrl, dataset), { headers: { "OData-Version": "4.0" } });
+      return Response.json(buildServiceDocument(baseUrl, dataset), { headers: { "OData-Version": "4.0", "content-type": "application/json;odata.metadata=minimal;IEEE754Compatible=true" } });
     }
 
     // Metadata — não executa SQL, não precisa de syncActorGrants
@@ -266,7 +266,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       }
     }
 
-    return Response.json(response, { headers: { "OData-Version": "4.0" } });
+    return Response.json(response, { headers: { "OData-Version": "4.0", "content-type": "application/json;odata.metadata=minimal;IEEE754Compatible=true" } });
   } catch (e) {
     if (process.env.NODE_ENV !== "production" && !(e instanceof ApiError)) {
       const msg = e instanceof Error ? e.message : String(e);
