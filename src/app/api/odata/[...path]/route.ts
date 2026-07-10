@@ -13,12 +13,16 @@ import type { Actor } from "@/server/auth/actor";
 
 const DATASET_CACHE_TTL = 60_000;
 const TOKEN_CACHE_TTL   = 60_000;
+const COUNT_CACHE_TTL   = 300_000; // 5 min — count não muda entre páginas de um mesmo refresh
+const DEFAULT_TOP       = 5_000;   // Power BI pagina em blocos — 5k reduz de ~52 req para ~11
 
 type CachedDataset = { dataset: Dataset; expiresAt: number };
 type CachedToken   = { actor: Actor; expiresAt: number };
+type CachedCount   = { count: number; expiresAt: number };
 
 const datasetCache = new Map<string, CachedDataset>();
 const tokenCache   = new Map<string, CachedToken>();
+const countCache   = new Map<string, CachedCount>();
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -172,6 +176,18 @@ function normalizeRow(row: Record<string, unknown>, typeMap: Map<string, string>
   return out;
 }
 
+// ── Cache de COUNT ────────────────────────────────────────────────────────────
+
+function getCachedCount(key: string): number | null {
+  const entry = countCache.get(key);
+  if (!entry || Date.now() >= entry.expiresAt) return null;
+  return entry.count;
+}
+
+function setCachedCount(key: string, count: number) {
+  countCache.set(key, { count, expiresAt: Date.now() + COUNT_CACHE_TTL });
+}
+
 // ── Query live ────────────────────────────────────────────────────────────────
 
 async function queryLiveTable(
@@ -180,6 +196,7 @@ async function queryLiveTable(
   top: number,
   skip: number,
   needCount: boolean,
+  countCacheKey: string,
 ): Promise<{ rows: Record<string, unknown>[]; totalCount: number | null }> {
   const colList = cols.map((c) => {
     const orig  = `"${c.originalName.replaceAll('"', '""')}"`;
@@ -194,6 +211,15 @@ async function queryLiveTable(
   const typeMap = new Map(cols.map((c) => [c.sqlName, c.sqlType.toUpperCase().replace(/\(.*\)/, "").trim()]));
 
   if (needCount) {
+    const cachedCount = getCachedCount(countCacheKey);
+    if (cachedCount !== null) {
+      return withPg(live.connection, async (client) => {
+        const dataResult = await client.query<Record<string, unknown>>(
+          `SELECT ${colList} FROM ${baseExpr} LIMIT ${top} OFFSET ${skip}`,
+        );
+        return { rows: dataResult.rows.map((row) => normalizeRow(row, typeMap)), totalCount: cachedCount };
+      });
+    }
     // COUNT e dados em paralelo — duas conexões simultâneas
     const [countResult, dataResult] = await Promise.all([
       withPg(live.connection, (client) =>
@@ -203,9 +229,11 @@ async function queryLiveTable(
         client.query<Record<string, unknown>>(`SELECT ${colList} FROM ${baseExpr} LIMIT ${top} OFFSET ${skip}`),
       ),
     ]);
+    const totalCount = Number(countResult.rows[0]?.cnt ?? 0);
+    setCachedCount(countCacheKey, totalCount);
     return {
       rows: dataResult.rows.map((row) => normalizeRow(row, typeMap)),
-      totalCount: Number(countResult.rows[0]?.cnt ?? 0),
+      totalCount,
     };
   }
 
@@ -293,7 +321,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (!table) throw new ApiError(404, "NOT_FOUND", "Tabela não encontrada");
 
     const url = request.nextUrl;
-    const rawTop  = parseInt(url.searchParams.get("$top")  ?? "1000", 10);
+    const rawTop  = parseInt(url.searchParams.get("$top")  ?? String(DEFAULT_TOP), 10);
     const rawSkip = parseInt(url.searchParams.get("$skip") ?? "0", 10);
     const selectParam = url.searchParams.get("$select");
     const countParam  = url.searchParams.get("$count");
@@ -307,10 +335,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (cols.length === 0) throw new ApiError(400, "BAD_REQUEST", "Nenhuma coluna válida selecionada");
 
     const needCount = countParam === "true";
+    const countCacheKey = `${projectSlug}/${datasetSlug}/${table.sqlName}`;
     const response: Record<string, unknown> = { "@odata.context": `${baseUrl}/$metadata#${table.sqlName}` };
 
     if (table.live) {
-      const { rows, totalCount } = await queryLiveTable(table.live, cols, top, skip, needCount);
+      const { rows, totalCount } = await queryLiveTable(table.live, cols, top, skip, needCount, countCacheKey);
       response["value"] = rows.map((r, i) => ({ ...r, _row_number: String(skip + i + 1) }));
       if (needCount) response["@odata.count"] = String(totalCount ?? 0);
       if (rows.length === top) {
@@ -327,15 +356,21 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       const dataSql  = `SELECT ${colList}, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS [_row_number] FROM [${dataset.schemaName}].[${table.sqlName}] ORDER BY (SELECT NULL) OFFSET ${skip} ROWS FETCH NEXT ${top} ROWS ONLY`;
       const countSql = `SELECT COUNT(*) AS [cnt] FROM [${dataset.schemaName}].[${table.sqlName}]`;
 
-      // COUNT e dados em paralelo quando solicitado
+      const cachedCount = getCachedCount(countCacheKey);
       const [result, countResult] = await Promise.all([
         executeReadOnly(actor.principal, dataSql, 120, top, [dataset.schemaName]),
-        needCount ? executeReadOnly(actor.principal, countSql, 30, 1, [dataset.schemaName]) : Promise.resolve(null),
+        needCount && cachedCount === null
+          ? executeReadOnly(actor.principal, countSql, 30, 1, [dataset.schemaName])
+          : Promise.resolve(null),
       ]);
 
       const typeMap = new Map(cols.map((c) => [c.sqlName, c.sqlType.toUpperCase().replace(/\(.*\)/, "").trim()]));
       response["value"] = result.rows.map((row) => normalizeRow(row as Record<string, unknown>, typeMap));
-      if (needCount) response["@odata.count"] = String((countResult!.rows[0] as Record<string, unknown>)?.cnt ?? 0);
+      if (needCount) {
+        const cnt = cachedCount ?? Number((countResult!.rows[0] as Record<string, unknown>)?.cnt ?? 0);
+        setCachedCount(countCacheKey, cnt);
+        response["@odata.count"] = String(cnt);
+      }
       if (result.rows.length === top) {
         const next = new URL(`${baseUrl}/${table.sqlName}`);
         next.searchParams.set("$top", String(top));

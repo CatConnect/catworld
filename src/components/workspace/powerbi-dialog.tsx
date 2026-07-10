@@ -96,6 +96,12 @@ export function PowerBIDialog({ projectSlug, datasetSlug, datasetName, publicOri
                     </ol>
                   </div>
 
+                  <div className="rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-xs text-base-content/70 space-y-1">
+                    <p className="font-semibold text-base-content">Dica de performance</p>
+                    <p>Tabelas com muitas colunas carregam mais rápido quando você seleciona apenas as colunas necessárias. No editor do Power Query, use <strong className="text-base-content">Escolher colunas</strong> logo após conectar.</p>
+                    <p>Ou adicione <code className="rounded bg-base-200 px-1">?$select=col1,col2</code> diretamente na URL para carregar menos dados.</p>
+                  </div>
+
                   <div className="rounded-lg border border-info/30 bg-info/10 px-4 py-3 text-xs text-base-content/70">
                     Para publicar o relatório no Power BI Service com atualização agendada, use a aba <strong>Power BI Service</strong> ao invés desta URL.
                   </div>
