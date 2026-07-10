@@ -2,9 +2,10 @@ import type { NextRequest } from "next/server";
 import { resolveActor } from "@/server/auth/actor";
 import { syncActorGrants } from "@/server/auth/sync-grants";
 import { executeReadOnly } from "@/server/azure/sql";
+import { withPg, quotedPgTable, type PgConnection } from "@/server/connections/postgres";
 import { ApiError, handleApiError } from "@/server/http";
 import { prisma } from "@/server/db";
-import { hashToken } from "@/server/security/crypto";
+import { hashToken, decryptSecret } from "@/server/security/crypto";
 import { env } from "@/server/env";
 import type { Actor } from "@/server/auth/actor";
 
@@ -74,7 +75,8 @@ function escXml(s: string) {
 }
 
 type Column = { sqlName: string; sqlType: string; nullable: boolean };
-type Table = { sqlName: string; columns: Column[] };
+type LiveSource = { mode: "live"; connection: PgConnection; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null };
+type Table = { sqlName: string; columns: Column[]; live: LiveSource | null };
 type Dataset = { schemaName: string; tables: Table[] };
 
 async function loadDataset(projectSlug: string, datasetSlug: string): Promise<Dataset> {
@@ -82,14 +84,58 @@ async function loadDataset(projectSlug: string, datasetSlug: string): Promise<Da
   if (!project) throw new ApiError(404, "NOT_FOUND", "Projeto não encontrado");
   const dataset = await prisma.dataset.findFirst({
     where: { projectId: project.id, slug: datasetSlug, active: true },
-    include: { tables: { include: { columns: { orderBy: { ordinal: "asc" } }, source: { select: { mode: true } } } } },
+    include: {
+      tables: {
+        include: {
+          columns: { orderBy: { ordinal: "asc" } },
+          source: { include: { connection: true } },
+        },
+      },
+    },
   });
   if (!dataset) throw new ApiError(404, "NOT_FOUND", "Dataset não encontrado");
-  // Tabelas "live" não existem no Azure SQL — expõe apenas upload (sem source) e extract
-  const tables = dataset.tables
-    .filter((t) => !t.source || t.source.mode === "extract")
-    .map((t) => ({ sqlName: t.sqlName, columns: t.columns }));
+  const tables: Table[] = dataset.tables.map((t) => {
+    const s = t.source;
+    const live: LiveSource | null = s?.mode === "live"
+      ? {
+          mode: "live",
+          connection: {
+            server: s.connection.server,
+            port: s.connection.port,
+            databaseName: s.connection.databaseName,
+            username: s.connection.username,
+            encryptedCredentials: s.connection.encryptedCredentials,
+            sslMode: s.connection.sslMode,
+          },
+          sourceKind: s.sourceKind,
+          sourceSchema: s.sourceSchema,
+          sourceTable: s.sourceTable,
+          sourceSql: s.sourceSql,
+        }
+      : null;
+    return { sqlName: t.sqlName, columns: t.columns, live };
+  });
   return { schemaName: dataset.schemaName, tables };
+}
+
+async function queryLiveTable(
+  live: LiveSource,
+  cols: Column[],
+  top: number,
+  skip: number,
+): Promise<{ rows: Record<string, unknown>[]; totalCount: number | null }> {
+  const colList = cols.map((c) => `"${c.sqlName.replaceAll('"', '""')}"`).join(", ");
+  const baseExpr = live.sourceKind === "table"
+    ? quotedPgTable(live.sourceSchema!, live.sourceTable!)
+    : `(${live.sourceSql!}) cw_live_src`;
+  return withPg(live.connection, async (client) => {
+    const countResult = await client.query<{ cnt: string }>(`SELECT COUNT(*) AS cnt FROM ${baseExpr}`);
+    const totalCount = Number(countResult.rows[0]?.cnt ?? 0);
+    const dataResult = await client.query<Record<string, unknown>>(
+      `SELECT ${colList} FROM ${baseExpr} LIMIT ${top} OFFSET ${skip}`,
+    );
+    return { rows: dataResult.rows, totalCount };
+  });
 }
 
 function buildServiceDocument(baseUrl: string, dataset: Dataset) {
@@ -157,9 +203,6 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       });
     }
 
-    // Entity data — precisa sincronizar permissões SQL antes de executar
-    await syncActorGrants(actor);
-
     const tableSqlName = rest[0]!;
     const table = dataset.tables.find((t) => t.sqlName === tableSqlName);
     if (!table) throw new ApiError(404, "NOT_FOUND", "Tabela não encontrada");
@@ -178,29 +221,44 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       : table.columns;
     if (cols.length === 0) throw new ApiError(400, "BAD_REQUEST", "Nenhuma coluna válida selecionada");
 
-    const colList = cols.map((c) => `[${c.sqlName}]`).join(", ");
-    const sql = `SELECT ${colList}, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) + ${skip} AS [_row_number] FROM [${dataset.schemaName}].[${table.sqlName}] ORDER BY (SELECT NULL) OFFSET ${skip} ROWS FETCH NEXT ${top} ROWS ONLY`;
-
-    const result = await executeReadOnly(actor.principal, sql, 120, top, [dataset.schemaName]);
-
     const response: Record<string, unknown> = {
       "@odata.context": `${baseUrl}/$metadata#${table.sqlName}`,
-      value: result.rows,
     };
 
-    if (countParam === "true") {
-      const countSql = `SELECT COUNT(*) AS [cnt] FROM [${dataset.schemaName}].[${table.sqlName}]`;
-      const cr = await executeReadOnly(actor.principal, countSql, 30, 1, [dataset.schemaName]);
-      response["@odata.count"] = Number((cr.rows[0] as Record<string, unknown>)?.cnt ?? 0);
-    }
-
-    if (result.rows.length === top) {
-      const next = new URL(`${baseUrl}/${table.sqlName}`);
-      next.searchParams.set("$top", String(top));
-      next.searchParams.set("$skip", String(skip + top));
-      if (selectParam) next.searchParams.set("$select", selectParam);
-      if (countParam === "true") next.searchParams.set("$count", "true");
-      response["@odata.nextLink"] = appendApiKey(next, apiKey);
+    if (table.live) {
+      // Tabela live — query direto ao Postgres da origem
+      const { rows, totalCount } = await queryLiveTable(table.live, cols, top, skip);
+      const valued = rows.map((r, i) => ({ ...r, _row_number: skip + i + 1 }));
+      response["value"] = valued;
+      if (countParam === "true") response["@odata.count"] = totalCount;
+      if (rows.length === top) {
+        const next = new URL(`${baseUrl}/${table.sqlName}`);
+        next.searchParams.set("$top", String(top));
+        next.searchParams.set("$skip", String(skip + top));
+        if (selectParam) next.searchParams.set("$select", selectParam);
+        if (countParam === "true") next.searchParams.set("$count", "true");
+        response["@odata.nextLink"] = appendApiKey(next, apiKey);
+      }
+    } else {
+      // Tabela extract ou upload — query no Azure SQL com controle de permissões
+      await syncActorGrants(actor);
+      const colList = cols.map((c) => `[${c.sqlName}]`).join(", ");
+      const sql = `SELECT ${colList}, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) + ${skip} AS [_row_number] FROM [${dataset.schemaName}].[${table.sqlName}] ORDER BY (SELECT NULL) OFFSET ${skip} ROWS FETCH NEXT ${top} ROWS ONLY`;
+      const result = await executeReadOnly(actor.principal, sql, 120, top, [dataset.schemaName]);
+      response["value"] = result.rows;
+      if (countParam === "true") {
+        const countSql = `SELECT COUNT(*) AS [cnt] FROM [${dataset.schemaName}].[${table.sqlName}]`;
+        const cr = await executeReadOnly(actor.principal, countSql, 30, 1, [dataset.schemaName]);
+        response["@odata.count"] = Number((cr.rows[0] as Record<string, unknown>)?.cnt ?? 0);
+      }
+      if (result.rows.length === top) {
+        const next = new URL(`${baseUrl}/${table.sqlName}`);
+        next.searchParams.set("$top", String(top));
+        next.searchParams.set("$skip", String(skip + top));
+        if (selectParam) next.searchParams.set("$select", selectParam);
+        if (countParam === "true") next.searchParams.set("$count", "true");
+        response["@odata.nextLink"] = appendApiKey(next, apiKey);
+      }
     }
 
     return Response.json(response, { headers: { "OData-Version": "4.0" } });
