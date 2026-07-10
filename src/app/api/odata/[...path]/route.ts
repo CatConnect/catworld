@@ -141,11 +141,19 @@ async function queryLiveTable(
     const dataResult = await client.query<Record<string, unknown>>(
       `SELECT ${colList} FROM ${baseExpr} LIMIT ${top} OFFSET ${skip}`,
     );
-    // Postgres retorna bool como JS boolean, mas o catálogo mapeia bool → NVARCHAR(MAX) → Edm.String.
-    // Converter para string para que o metadata e o valor coincidam.
+    // Normaliza tipos para compatibilidade OData/Power BI:
+    // - boolean → "true"/"false" (catalog mapeia bool PG → NVARCHAR → Edm.String)
+    // - object/array (JSON, JSONB, arrays PG) → JSON string (Edm.String)
+    // - Date → passa; JSON.stringify serializa como ISO 8601 (Edm.DateTimeOffset/Date)
+    // - null → null; primitivos → passam direto
     const rows = dataResult.rows.map((row) => {
       const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(row)) out[k] = typeof v === "boolean" ? String(v) : v;
+      for (const [k, v] of Object.entries(row)) {
+        if (v === null || v === undefined) out[k] = null;
+        else if (typeof v === "boolean") out[k] = String(v);
+        else if (typeof v === "object" && !(v instanceof Date)) out[k] = JSON.stringify(v);
+        else out[k] = v;
+      }
       return out;
     });
     return { rows, totalCount };
