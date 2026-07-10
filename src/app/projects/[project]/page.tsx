@@ -3,6 +3,7 @@ import { prisma } from "@/server/db";
 import { ProjectWorkspace } from "@/components/workspace/project-workspace";
 import { resolveActor } from "@/server/auth/actor";
 import { visibleProjectIds } from "@/server/auth/permissions";
+import { env } from "@/server/env";
 export const dynamic = "force-dynamic";
 
 export default async function ProjectPage({ params }: { params: Promise<{ project: string }> }) {
@@ -49,5 +50,6 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
       })),
     })),
   };
-  return <ProjectWorkspace project={project} />;
+  const publicOrigin = env().CATWORLD_PUBLIC_ORIGIN ?? "";
+  return <ProjectWorkspace project={project} publicOrigin={publicOrigin} />;
 }

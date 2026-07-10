@@ -25,13 +25,12 @@ function CopyField({ label, value, mono = true }: { label: string; value: string
 
 type Tab = "desktop" | "service";
 
-export function PowerBIDialog({ projectSlug, datasetSlug, datasetName }: { projectSlug: string; datasetSlug: string; datasetName: string }) {
+export function PowerBIDialog({ projectSlug, datasetSlug, datasetName, publicOrigin }: { projectSlug: string; datasetSlug: string; datasetName: string; publicOrigin: string }) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<Tab>("desktop");
   const [token, setToken] = useState("");
 
-  const origin = typeof window !== "undefined" ? window.location.origin : "";
-  const baseUrl = `${origin}/api/odata/${projectSlug}/${datasetSlug}`;
+  const baseUrl = `${publicOrigin}/api/odata/${projectSlug}/${datasetSlug}`;
   const serviceUrl = token ? `${baseUrl}?api_key=${token}` : `${baseUrl}?api_key=SEU_TOKEN_AQUI`;
 
   return (

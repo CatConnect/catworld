@@ -17,7 +17,7 @@ type Project = { id: string; slug: string; name: string; description: string | n
 
 type Selection = { kind: "overview" } | { kind: "query" } | { kind: "dataset"; datasetId: string } | { kind: "table"; datasetId: string; tableId: string };
 
-export function ProjectWorkspace({ project }: { project: Project }) {
+export function ProjectWorkspace({ project, publicOrigin }: { project: Project; publicOrigin: string }) {
   const router = useRouter();
   const [selection, setSelection] = useState<Selection>({ kind: "overview" });
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -86,7 +86,7 @@ export function ProjectWorkspace({ project }: { project: Project }) {
         )}
         {selection.kind === "query" && <QueryPanel datasets={project.datasets} />}
         {selection.kind === "dataset" && activeDataset && (
-          <DatasetPanel dataset={activeDataset} projectSlug={project.slug} onSelectTable={(tableId) => setSelection({ kind: "table", datasetId: activeDataset.id, tableId })} onChanged={refresh} />
+          <DatasetPanel dataset={activeDataset} projectSlug={project.slug} publicOrigin={publicOrigin} onSelectTable={(tableId) => setSelection({ kind: "table", datasetId: activeDataset.id, tableId })} onChanged={refresh} />
         )}
         {selection.kind === "table" && activeDataset && activeTable && (
           <TablePanel datasetId={activeDataset.id} table={activeTable} onChanged={refresh} />

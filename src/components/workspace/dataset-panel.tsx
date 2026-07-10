@@ -26,7 +26,7 @@ function refreshText(policy: string) {
   return { manual: "Manual", hourly: "A cada hora", daily: "Diária", weekly: "Semanal" }[policy] ?? policy;
 }
 
-export function DatasetPanel({ dataset, projectSlug, onSelectTable, onChanged }: { dataset: Dataset; projectSlug: string; onSelectTable: (tableId: string) => void; onChanged: () => void }) {
+export function DatasetPanel({ dataset, projectSlug, publicOrigin, onSelectTable, onChanged }: { dataset: Dataset; projectSlug: string; publicOrigin: string; onSelectTable: (tableId: string) => void; onChanged: () => void }) {
   const sourceTables = dataset.tables.filter((t) => t.source);
   const uploadTables = dataset.tables.filter((t) => !t.source);
 
@@ -41,7 +41,7 @@ export function DatasetPanel({ dataset, projectSlug, onSelectTable, onChanged }:
         <div className="flex items-start justify-between gap-3">
           <div><h2 className="text-lg font-semibold">{dataset.name}</h2><p className="mt-1 text-sm text-base-content/55">{dataset.description}</p></div>
           <div className="flex items-center gap-2">
-            <PowerBIDialog projectSlug={projectSlug} datasetSlug={dataset.slug} datasetName={dataset.name} />
+            <PowerBIDialog projectSlug={projectSlug} datasetSlug={dataset.slug} datasetName={dataset.name} publicOrigin={publicOrigin} />
             <EditCatalogDialog kind="dataset" id={dataset.id} name={dataset.name} description={dataset.description} active={dataset.active} />
           </div>
         </div>
