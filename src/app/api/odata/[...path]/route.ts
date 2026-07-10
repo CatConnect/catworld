@@ -5,14 +5,16 @@ import { executeReadOnly } from "@/server/azure/sql";
 import { ApiError, handleApiError } from "@/server/http";
 import { prisma } from "@/server/db";
 import { hashToken } from "@/server/security/crypto";
+import { env } from "@/server/env";
 import type { Actor } from "@/server/auth/actor";
 
 async function resolveODataActor(request: NextRequest): Promise<Actor> {
-  // 1. Bearer token no header
   const auth = request.headers.get("authorization");
+
+  // 1. Bearer token
   if (auth?.match(/^Bearer\s+/i)) return resolveActor(request);
 
-  // 2. Basic auth (usuário qualquer, senha = token) — Power BI Desktop
+  // 2. Basic auth — Power BI Desktop (usuário: qualquer, senha: token)
   const basic = auth?.match(/^Basic\s+(.+)$/i)?.[1];
   if (basic) {
     const decoded = Buffer.from(basic, "base64").toString("utf-8");
@@ -24,10 +26,11 @@ async function resolveODataActor(request: NextRequest): Promise<Actor> {
         await prisma.apiToken.update({ where: { id: token.id }, data: { lastUsedAt: new Date() } });
         return { type: "token", id: token.id, role: "TOKEN", principal: `cw_t_${token.id.replaceAll("-", "").slice(0, 24)}` };
       }
+      throw new ApiError(401, "INVALID_TOKEN", "Token inválido, expirado ou revogado.");
     }
   }
 
-  // 3. Query param ?api_key=TOKEN — Power BI Service (autenticação Anônima + token na URL)
+  // 3. ?api_key=TOKEN — Power BI Service com autenticação Anônima
   const apiKey = request.nextUrl.searchParams.get("api_key");
   if (apiKey) {
     const token = await prisma.apiToken.findUnique({ where: { tokenHash: hashToken(apiKey) } });
@@ -35,9 +38,20 @@ async function resolveODataActor(request: NextRequest): Promise<Actor> {
       await prisma.apiToken.update({ where: { id: token.id }, data: { lastUsedAt: new Date() } });
       return { type: "token", id: token.id, role: "TOKEN", principal: `cw_t_${token.id.replaceAll("-", "").slice(0, 24)}` };
     }
+    throw new ApiError(401, "INVALID_TOKEN", "Token inválido, expirado ou revogado.");
   }
 
-  throw new ApiError(401, "UNAUTHENTICATED", "Autenticação necessária. Use Authorization: Bearer <token>, Basic auth ou ?api_key=<token>.");
+  throw new ApiError(401, "UNAUTHENTICATED", "Autenticação necessária. Use ?api_key=<token>, Basic auth ou Authorization: Bearer <token>.");
+}
+
+function publicOrigin(): string {
+  return env().CATWORLD_PUBLIC_ORIGIN ?? "";
+}
+
+// Preserva ?api_key nas URLs de paginação para que o Power BI continue autenticado
+function appendApiKey(url: URL, apiKey: string | null): string {
+  if (apiKey) url.searchParams.set("api_key", apiKey);
+  return url.toString();
 }
 
 function sqlToEdmType(sqlType: string): string {
@@ -123,19 +137,24 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const [projectSlug, datasetSlug, ...rest] = path;
     const dataset = await loadDataset(projectSlug!, datasetSlug!);
 
-    await syncActorGrants(actor);
+    const origin = publicOrigin();
+    const baseUrl = `${origin}/api/odata/${projectSlug}/${datasetSlug}`;
+    const apiKey = request.nextUrl.searchParams.get("api_key");
 
-    const baseUrl = `${request.nextUrl.origin}/api/odata/${projectSlug}/${datasetSlug}`;
-
+    // Service document — não executa SQL, não precisa de syncActorGrants
     if (rest.length === 0) {
       return Response.json(buildServiceDocument(baseUrl, dataset), { headers: { "OData-Version": "4.0" } });
     }
 
+    // Metadata — não executa SQL, não precisa de syncActorGrants
     if (rest[0] === "$metadata") {
       return new Response(buildMetadata(dataset), {
         headers: { "content-type": "application/xml; charset=utf-8", "OData-Version": "4.0" },
       });
     }
+
+    // Entity data — precisa sincronizar permissões SQL antes de executar
+    await syncActorGrants(actor);
 
     const tableSqlName = rest[0]!;
     const table = dataset.tables.find((t) => t.sqlName === tableSqlName);
@@ -177,7 +196,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       next.searchParams.set("$skip", String(skip + top));
       if (selectParam) next.searchParams.set("$select", selectParam);
       if (countParam === "true") next.searchParams.set("$count", "true");
-      response["@odata.nextLink"] = next.toString();
+      response["@odata.nextLink"] = appendApiKey(next, apiKey);
     }
 
     return Response.json(response, { headers: { "OData-Version": "4.0" } });
