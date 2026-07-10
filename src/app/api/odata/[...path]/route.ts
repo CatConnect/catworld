@@ -141,7 +141,14 @@ async function queryLiveTable(
     const dataResult = await client.query<Record<string, unknown>>(
       `SELECT ${colList} FROM ${baseExpr} LIMIT ${top} OFFSET ${skip}`,
     );
-    return { rows: dataResult.rows, totalCount };
+    // Postgres retorna bool como JS boolean, mas o catálogo mapeia bool → NVARCHAR(MAX) → Edm.String.
+    // Converter para string para que o metadata e o valor coincidam.
+    const rows = dataResult.rows.map((row) => {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(row)) out[k] = typeof v === "boolean" ? String(v) : v;
+      return out;
+    });
+    return { rows, totalCount };
   });
 }
 
