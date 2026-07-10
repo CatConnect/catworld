@@ -5,7 +5,7 @@ import { executeReadOnly } from "@/server/azure/sql";
 import { withPg, quotedPgTable, type PgConnection } from "@/server/connections/postgres";
 import { ApiError, handleApiError } from "@/server/http";
 import { prisma } from "@/server/db";
-import { hashToken, decryptSecret } from "@/server/security/crypto";
+import { hashToken } from "@/server/security/crypto";
 import { env } from "@/server/env";
 import type { Actor } from "@/server/auth/actor";
 
@@ -123,6 +123,7 @@ async function queryLiveTable(
   cols: Column[],
   top: number,
   skip: number,
+  needCount: boolean,
 ): Promise<{ rows: Record<string, unknown>[]; totalCount: number | null }> {
   // Postgres usa originalName; alias para sqlName para manter consistência com tabelas extract
   const colList = cols.map((c) => {
@@ -134,8 +135,9 @@ async function queryLiveTable(
     ? quotedPgTable(live.sourceSchema!, live.sourceTable!)
     : `(${live.sourceSql!}) cw_live_src`;
   return withPg(live.connection, async (client) => {
-    const countResult = await client.query<{ cnt: string }>(`SELECT COUNT(*) AS cnt FROM ${baseExpr}`);
-    const totalCount = Number(countResult.rows[0]?.cnt ?? 0);
+    const totalCount = needCount
+      ? Number((await client.query<{ cnt: string }>(`SELECT COUNT(*) AS cnt FROM ${baseExpr}`)).rows[0]?.cnt ?? 0)
+      : null;
     const dataResult = await client.query<Record<string, unknown>>(
       `SELECT ${colList} FROM ${baseExpr} LIMIT ${top} OFFSET ${skip}`,
     );
@@ -232,7 +234,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
     if (table.live) {
       // Tabela live — query direto ao Postgres da origem
-      const { rows, totalCount } = await queryLiveTable(table.live, cols, top, skip);
+      const { rows, totalCount } = await queryLiveTable(table.live, cols, top, skip, countParam === "true");
       const valued = rows.map((r, i) => ({ ...r, _row_number: skip + i + 1 }));
       response["value"] = valued;
       if (countParam === "true") response["@odata.count"] = totalCount;
