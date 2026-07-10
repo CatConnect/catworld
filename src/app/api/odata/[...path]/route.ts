@@ -271,7 +271,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       const { rows, totalCount } = await queryLiveTable(table.live, cols, top, skip, countParam === "true");
       const valued = rows.map((r, i) => ({ ...r, _row_number: String(skip + i + 1) }));
       response["value"] = valued;
-      if (countParam === "true") response["@odata.count"] = totalCount;
+      if (countParam === "true") response["@odata.count"] = String(totalCount ?? 0);
       if (rows.length === top) {
         const next = new URL(`${baseUrl}/${table.sqlName}`);
         next.searchParams.set("$top", String(top));
@@ -290,7 +290,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       if (countParam === "true") {
         const countSql = `SELECT COUNT(*) AS [cnt] FROM [${dataset.schemaName}].[${table.sqlName}]`;
         const cr = await executeReadOnly(actor.principal, countSql, 30, 1, [dataset.schemaName]);
-        response["@odata.count"] = Number((cr.rows[0] as Record<string, unknown>)?.cnt ?? 0);
+        response["@odata.count"] = String((cr.rows[0] as Record<string, unknown>)?.cnt ?? 0);
       }
       if (result.rows.length === top) {
         const next = new URL(`${baseUrl}/${table.sqlName}`);
