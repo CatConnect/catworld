@@ -104,9 +104,10 @@ export function PowerBIDialog({ projectSlug, datasetSlug, datasetName, publicOri
 
               {tab === "service" && (
                 <>
-                  <div className="rounded-lg border border-warning/30 bg-warning/5 px-4 py-3 text-xs text-base-content/70">
-                    <strong className="text-base-content">Por que uma URL diferente?</strong><br />
-                    O Power BI Service não suporta autenticação Básica confiável para OData. A solução é embutir o token na URL e usar <strong>Autenticação Anônima</strong> no Service — assim o refresh agendado funciona sem gateway.
+                  <div className="rounded-lg border border-info/30 bg-info/5 px-4 py-3 text-xs text-base-content/70">
+                    <strong className="text-base-content">Duas formas de autenticar no Service</strong><br />
+                    <strong>Opção A — Básica:</strong> use a URL base (sem token) e configure usuário/senha nas credenciais do dataset no Service. Senha = seu token de API.<br />
+                    <strong>Opção B — Token na URL:</strong> gere a URL abaixo com <code>?api_key=TOKEN</code> e use <strong>Autenticação Anônima</strong> no Service. Ambas funcionam sem gateway.
                   </div>
 
                   <div>
