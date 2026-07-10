@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
-  Activity, ArrowUpFromLine, Bell, ChevronRight, CircleUserRound, CloudCog, Database,
+  Activity, ArrowUpFromLine, Bell, BookOpen, ChevronRight, CircleUserRound, CloudCog, Database,
   FileKey2, FolderKanban, KeyRound, LayoutDashboard, Menu, Moon, Search,
   Settings, Sun, UsersRound, X,
 } from "lucide-react";
@@ -18,6 +18,10 @@ const nav = [
   { href: "/database-users", label: "Usuários do banco", icon: FileKey2 },
   { href: "/audit", label: "Auditoria", icon: Activity },
   { href: "/settings/connections", label: "Configurações", icon: Settings },
+];
+
+const navBottom = [
+  { href: "/knowledge", label: "Base de conhecimento", icon: BookOpen },
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -50,6 +54,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <ul className="menu w-full gap-1 p-0">
             {nav.map((item) => {
               const active = pathname === item.href || (item.href !== "/dashboard" && pathname.startsWith(`${item.href}/`));
+              return (
+                <li key={item.href}>
+                  <Link href={item.href} onClick={() => setSidebarOpen(false)} className={active ? "active font-medium" : "text-base-content/70"}>
+                    <item.icon size={17} />{item.label}
+                  </Link>
+                </li>
+              );
+            })}
+          </ul>
+          <div className="my-3 border-t border-base-300" />
+          <ul className="menu w-full gap-1 p-0">
+            {navBottom.map((item) => {
+              const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
               return (
                 <li key={item.href}>
                   <Link href={item.href} onClick={() => setSidebarOpen(false)} className={active ? "active font-medium" : "text-base-content/70"}>

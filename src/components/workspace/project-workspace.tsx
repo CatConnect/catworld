@@ -12,8 +12,8 @@ import { QueryPanel } from "./query-panel";
 type Column = { id: string; sqlName: string; originalName: string; sqlType: string; nullable: boolean };
 type TableSource = { id: string; name: string; mode: string; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; refreshPolicy: string; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { id: string; name: string } };
 type Table = { id: string; name: string; sqlName: string; rowCount: string; source: TableSource | null; columns: Column[] };
-type Dataset = { id: string; name: string; description: string | null; active: boolean; schemaName: string; tables: Table[] };
-type Project = { id: string; name: string; description: string | null; active: boolean; datasets: Dataset[] };
+type Dataset = { id: string; slug: string; name: string; description: string | null; active: boolean; schemaName: string; tables: Table[] };
+type Project = { id: string; slug: string; name: string; description: string | null; active: boolean; datasets: Dataset[] };
 
 type Selection = { kind: "overview" } | { kind: "query" } | { kind: "dataset"; datasetId: string } | { kind: "table"; datasetId: string; tableId: string };
 
@@ -86,7 +86,7 @@ export function ProjectWorkspace({ project }: { project: Project }) {
         )}
         {selection.kind === "query" && <QueryPanel datasets={project.datasets} />}
         {selection.kind === "dataset" && activeDataset && (
-          <DatasetPanel dataset={activeDataset} onSelectTable={(tableId) => setSelection({ kind: "table", datasetId: activeDataset.id, tableId })} onChanged={refresh} />
+          <DatasetPanel dataset={activeDataset} projectSlug={project.slug} onSelectTable={(tableId) => setSelection({ kind: "table", datasetId: activeDataset.id, tableId })} onChanged={refresh} />
         )}
         {selection.kind === "table" && activeDataset && activeTable && (
           <TablePanel datasetId={activeDataset.id} table={activeTable} onChanged={refresh} />

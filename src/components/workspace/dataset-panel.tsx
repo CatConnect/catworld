@@ -5,10 +5,11 @@ import { EditCatalogDialog } from "@/components/management/edit-catalog-dialog";
 import { EmptyState, Panel, StatusBadge } from "@/components/ui/primitives";
 import { UploadFlow } from "./upload-flow";
 import { SourceDialog } from "./source-dialog";
+import { PowerBIDialog } from "./powerbi-dialog";
 
 type Source = { id: string; name: string; mode: string; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; refreshPolicy: string; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { id: string; name: string } };
 type Table = { id: string; name: string; source: Source | null };
-type Dataset = { id: string; name: string; description: string | null; active: boolean; tables: Table[] };
+type Dataset = { id: string; slug: string; name: string; description: string | null; active: boolean; tables: Table[] };
 
 function modeText(mode: string) {
   return mode === "live" ? "Consulta ao vivo" : "Cópia no Catworld";
@@ -25,7 +26,7 @@ function refreshText(policy: string) {
   return { manual: "Manual", hourly: "A cada hora", daily: "Diária", weekly: "Semanal" }[policy] ?? policy;
 }
 
-export function DatasetPanel({ dataset, onSelectTable, onChanged }: { dataset: Dataset; onSelectTable: (tableId: string) => void; onChanged: () => void }) {
+export function DatasetPanel({ dataset, projectSlug, onSelectTable, onChanged }: { dataset: Dataset; projectSlug: string; onSelectTable: (tableId: string) => void; onChanged: () => void }) {
   const sourceTables = dataset.tables.filter((t) => t.source);
   const uploadTables = dataset.tables.filter((t) => !t.source);
 
@@ -39,7 +40,10 @@ export function DatasetPanel({ dataset, onSelectTable, onChanged }: { dataset: D
       <div className="rounded-box border border-base-300 bg-base-100 p-5">
         <div className="flex items-start justify-between gap-3">
           <div><h2 className="text-lg font-semibold">{dataset.name}</h2><p className="mt-1 text-sm text-base-content/55">{dataset.description}</p></div>
-          <EditCatalogDialog kind="dataset" id={dataset.id} name={dataset.name} description={dataset.description} active={dataset.active} />
+          <div className="flex items-center gap-2">
+            <PowerBIDialog projectSlug={projectSlug} datasetSlug={dataset.slug} datasetName={dataset.name} />
+            <EditCatalogDialog kind="dataset" id={dataset.id} name={dataset.name} description={dataset.description} active={dataset.active} />
+          </div>
         </div>
         <div className="mt-3"><CopyableId value={dataset.id} label="Dataset ID" /></div>
       </div>

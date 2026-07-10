@@ -14,11 +14,13 @@ export default async function ProjectPage({ params }: { params: Promise<{ projec
   if (!p) notFound();
   const project = {
     id: p.id,
+    slug: p.slug,
     name: p.name,
     description: p.description,
     active: p.active,
     datasets: p.datasets.map((d) => ({
       id: d.id,
+      slug: d.slug,
       name: d.name,
       description: d.description,
       active: d.active,
