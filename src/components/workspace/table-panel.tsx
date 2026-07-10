@@ -14,6 +14,15 @@ function sourceStatus(status: string | null): "healthy" | "warning" | "error" | 
   return "inactive";
 }
 
+function fmtCell(v: unknown): string {
+  if (v === null || v === undefined) return "NULL";
+  const s = String(v);
+  // mssql driver returns TIME columns as 1970-01-01T<HH:MM:SS>.000Z
+  const m = s.match(/^1970-01-01T(\d{2}:\d{2}:\d{2})/);
+  if (m) return m[1]!;
+  return s;
+}
+
 function sourceMode(source: Source) {
   return source.mode === "live" ? "Consulta ao vivo" : "Cópia no Catworld";
 }
@@ -101,7 +110,7 @@ export function TablePanel({ datasetId, table, onChanged }: { datasetId: string;
         <button className={`tab gap-2 ${tab === "data" ? "tab-active" : ""}`} onClick={() => setTab("data")}><Rows3 size={14} />Dados</button>
         <button className={`tab gap-2 ${tab === "columns" ? "tab-active" : ""}`} onClick={() => setTab("columns")}><Columns3 size={14} />Colunas</button>
       </div>
-      {tab === "data" ? <div className="overflow-x-auto">{loading ? <div className="p-10 text-center"><span className="loading loading-spinner" /></div> : rows.length === 0 ? <div className="p-10 text-center text-sm text-base-content/50">Nenhuma linha para exibir.</div> : <table className="table table-zebra data-grid"><thead><tr>{table.columns.map((c) => <th key={c.id}>{c.sqlName}</th>)}</tr></thead><tbody>{rows.map((row, i) => <tr key={i}>{table.columns.map((c) => <td className="whitespace-nowrap" key={c.id}>{String(row[c.sqlName] ?? "NULL")}</td>)}</tr>)}</tbody></table>}</div> : <div className="overflow-x-auto"><table className="table"><thead><tr><th>Coluna</th><th>Original</th><th>Tipo</th><th>Nulável</th></tr></thead><tbody>{table.columns.map((c) => <tr key={c.id}><td className="font-mono text-xs">{c.sqlName}</td><td>{c.originalName}</td><td>{c.sqlType}</td><td>{c.nullable ? "Sim" : "Não"}</td></tr>)}</tbody></table></div>}
+      {tab === "data" ? <div className="overflow-x-auto">{loading ? <div className="p-10 text-center"><span className="loading loading-spinner" /></div> : rows.length === 0 ? <div className="p-10 text-center text-sm text-base-content/50">Nenhuma linha para exibir.</div> : <table className="table table-zebra data-grid"><thead><tr>{table.columns.map((c) => <th key={c.id}>{c.sqlName}</th>)}</tr></thead><tbody>{rows.map((row, i) => <tr key={i}>{table.columns.map((c) => <td className="whitespace-nowrap" key={c.id}>{fmtCell(row[c.sqlName])}</td>)}</tr>)}</tbody></table>}</div> : <div className="overflow-x-auto"><table className="table"><thead><tr><th>Coluna</th><th>Original</th><th>Tipo</th><th>Nulável</th></tr></thead><tbody>{table.columns.map((c) => <tr key={c.id}><td className="font-mono text-xs">{c.sqlName}</td><td>{c.originalName}</td><td>{c.sqlType}</td><td>{c.nullable ? "Sim" : "Não"}</td></tr>)}</tbody></table></div>}
     </div>
   );
 }

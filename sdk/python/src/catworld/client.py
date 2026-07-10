@@ -5,6 +5,7 @@ import json as _json
 import logging
 import re
 import zlib as _zlib
+import datetime as _datetime
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -21,6 +22,24 @@ logger = logging.getLogger("catworld")
 logger.addHandler(logging.NullHandler())
 
 _PAGE_SIZE = 10_000
+_TIME_RE = re.compile(r"^1970-01-01T(\d{2}:\d{2}:\d{2})")
+
+
+def _fix_rows(rows: list) -> list:
+    """Convert mssql TIME-as-epoch strings (1970-01-01THH:MM:SS.000Z) to plain HH:MM:SS."""
+    if not rows:
+        return rows
+    out = []
+    for row in rows:
+        fixed = {}
+        for k, v in row.items():
+            if isinstance(v, str):
+                m = _TIME_RE.match(v)
+                fixed[k] = m.group(1) if m else v
+            else:
+                fixed[k] = v
+        out.append(fixed)
+    return out
 
 
 def _fmt_bytes(n: int) -> str:
@@ -45,7 +64,7 @@ def _table_refs(sql: str) -> list[str]:
 class QueryResult(dict):
     @property
     def rows(self) -> list[dict[str, Any]]:
-        return self.get("rows", [])
+        return _fix_rows(self.get("rows", []))
 
     @property
     def columns(self) -> list[str]:
