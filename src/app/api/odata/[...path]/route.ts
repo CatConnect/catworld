@@ -164,7 +164,7 @@ async function queryLiveTable(
   }).join(", ");
   const baseExpr = live.sourceKind === "table"
     ? quotedPgTable(live.sourceSchema!, live.sourceTable!)
-    : `(${live.sourceSql!}) cw_live_src`;
+    : `(${live.sourceSql!.replace(/;\s*$/, "")}) cw_live_src`;
   return withPg(live.connection, async (client) => {
     const totalCount = needCount
       ? Number((await client.query<{ cnt: string }>(`SELECT COUNT(*) AS cnt FROM ${baseExpr}`)).rows[0]?.cnt ?? 0)
