@@ -122,7 +122,7 @@ const tableMap = new Map<string, string[]>();
     (request as unknown as { timeout: number }).timeout = Math.min(Math.max(timeout, 1), 120) * 1000;
     await request.query(`EXECUTE AS USER = N'${escapeSqlLiteral(principal)}'`);
     const started = Date.now();
-    const paged = offset > 0 || limit < 10_000
+    const paged = offset > 0
       ? `SELECT * FROM (${statement}) AS _cw_q ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`
       : statement;
     const result = await request.query(paged);
