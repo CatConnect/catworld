@@ -1,6 +1,6 @@
 "use client";
 import { useMemo, useState } from "react";
-import { Cable, ChevronRight, Database, DatabaseZap, RefreshCw, Search, Table2, Terminal, Trash2, TriangleAlert, X } from "lucide-react";
+import { Cable, Check, ChevronRight, Copy, Database, DatabaseZap, RefreshCw, Search, Table2, Terminal, Trash2, TriangleAlert, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { StatusBadge } from "@/components/ui/primitives";
 import { CreateCatalogDialog } from "@/components/management/create-catalog-dialog";
@@ -17,6 +17,23 @@ type Project = { id: string; slug: string; name: string; description: string | n
 type Tab =
   | { id: string; kind: "table"; datasetId: string; tableId: string; label: string }
   | { id: string; kind: "query"; label: string };
+
+function CopyId({ label, id, className }: { label: string; id: string; className?: string }) {
+  const [copied, setCopied] = useState(false);
+  function copy() {
+    navigator.clipboard.writeText(id).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); });
+  }
+  return (
+    <button
+      onClick={copy}
+      title={`Copiar ${label} ID`}
+      className={`group flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left text-[10px] text-base-content/35 transition-colors hover:bg-base-200 hover:text-base-content/60 ${className ?? ""}`}
+    >
+      {copied ? <Check size={10} className="shrink-0 text-success" /> : <Copy size={10} className="shrink-0 opacity-0 group-hover:opacity-100" />}
+      <span className="font-mono truncate">{label}: {id}</span>
+    </button>
+  );
+}
 
 function sourceStatus(status: string | null): "healthy" | "warning" | "error" | "inactive" {
   if (status === "completed" || status === "ready") return "healthy";
@@ -86,6 +103,12 @@ function MetadataPanel({ table, dataset, onChanged }: { table: Table; dataset: D
             <StatusBadge status={sourceStatus(table.source.lastStatus)} label={table.source.lastStatus ?? "Pronta"} />
           </div>
         )}
+      </div>
+
+      {/* IDs */}
+      <div className="border-b border-base-300 px-3 py-2 space-y-0.5">
+        <CopyId label="table" id={table.id} />
+        <CopyId label="dataset" id={dataset.id} />
       </div>
 
       {/* Columns */}
@@ -247,6 +270,7 @@ export function ProjectWorkspace({ project, publicOrigin }: { project: Project; 
 
               {expanded.has(d.id) && (
                 <div className="ml-5 border-l border-base-300 pl-2 mb-1">
+                  <CopyId label="dataset" id={d.id} className="mb-1" />
                   {d.tables.map(t => {
                     const tabId = `table-${t.id}`;
                     const isActive = activeTabId === tabId;
@@ -283,6 +307,7 @@ export function ProjectWorkspace({ project, publicOrigin }: { project: Project; 
             </div>
           </div>
           {project.description && <p className="mt-0.5 truncate text-[11px] text-base-content/40">{project.description}</p>}
+          <CopyId label="project" id={project.id} />
         </div>
       </div>
 

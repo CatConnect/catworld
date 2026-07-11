@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   Activity, ArrowUpFromLine, Bell, BookOpen, ChevronRight, CircleUserRound, CloudCog, Database,
-  FileKey2, FolderKanban, KeyRound, LayoutDashboard, Menu, Moon, Search,
+  FileKey2, FolderKanban, Home, KeyRound, LayoutDashboard, Menu, Moon, Search,
   Settings, Sun, UsersRound, X,
 } from "lucide-react";
 
@@ -94,7 +94,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       <div className="min-w-0">
         <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-base-300 bg-base-100/90 px-4 backdrop-blur-xl sm:px-6">
-          <button className={`btn btn-ghost btn-sm btn-square ${isWorkspace ? "" : "lg:hidden"}`} onClick={() => setSidebarOpen(true)}><Menu size={20} /></button>
+          {isWorkspace ? (
+            <Link href="/projects" className="btn btn-ghost btn-sm btn-square" aria-label="Voltar para projetos"><Home size={20} /></Link>
+          ) : (
+            <button className="btn btn-ghost btn-sm btn-square lg:hidden" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button>
+          )}
           <label className="input input-sm hidden w-full max-w-md items-center gap-2 bg-base-200 md:flex">
             <Search size={15} className="text-base-content/45" />
             <input type="search" placeholder="Buscar projetos, datasets ou tabelas..." className="grow" />
