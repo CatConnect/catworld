@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
+import * as Sentry from "@sentry/nextjs";
 import { prisma } from "@/server/db";
 import { resolveActor } from "@/server/auth/actor";
 import { canAccess } from "@/server/auth/permissions";
@@ -23,7 +24,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       ? await executeMssqlReadOnly(source.connection, query, input.timeout, input.limit, input.offset)
       : await executePostgresReadOnly(source.connection, query, input.timeout, input.limit, input.offset));
   } catch (e) {
-    if (e instanceof Error && "code" in e) return handleApiError(new ApiError(400, "QUERY_FAILED", e.message));
+    if (e instanceof Error && "code" in e) {
+      Sentry.captureException(e);
+      return handleApiError(new ApiError(400, "QUERY_FAILED", e.message));
+    }
     return handleApiError(e);
   }
 }
