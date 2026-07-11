@@ -111,13 +111,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
           </div>
         </header>
-        <main className="p-4 sm:p-6 lg:p-8">
-          <div className="mb-5 flex items-center gap-1 text-xs capitalize text-base-content/45">
-            <span>Catworld</span>
-            {crumbs.map((crumb) => <span className="flex items-center gap-1" key={crumb}><ChevronRight size={12} /><span>{crumb}</span></span>)}
-          </div>
-          <div className="mx-auto max-w-[1500px]">{children}</div>
-        </main>
+        {isWorkspace ? (
+          <main className="overflow-hidden">{children}</main>
+        ) : (
+          <main className="p-4 sm:p-6 lg:p-8">
+            <div className="mb-5 flex items-center gap-1 text-xs capitalize text-base-content/45">
+              <span>Catworld</span>
+              {crumbs.map((crumb) => <span className="flex items-center gap-1" key={crumb}><ChevronRight size={12} /><span>{crumb}</span></span>)}
+            </div>
+            <div className="mx-auto max-w-[1500px]">{children}</div>
+          </main>
+        )}
       </div>
     </div>
   );

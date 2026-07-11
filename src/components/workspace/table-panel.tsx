@@ -63,7 +63,7 @@ function UpdateDataDialog({ datasetId, table, onComplete }: { datasetId: string;
   return <><button onClick={() => ref.current?.showModal()} className="btn btn-outline btn-sm"><RefreshCw size={14} />Atualizar dados</button><dialog ref={ref} className="modal"><div className="modal-box max-w-2xl"><h3 className="text-lg font-bold">Atualizar {table.name}</h3><div className="mt-4"><UploadFlow datasetId={datasetId} targetTable={{ id: table.id, name: table.name }} onComplete={() => { ref.current?.close(); onComplete(); }} /></div><div className="modal-action"><button type="button" onClick={() => ref.current?.close()} className="btn btn-ghost btn-sm">Fechar</button></div></div><form method="dialog" className="modal-backdrop"><button onClick={() => ref.current?.close()}>fechar</button></form></dialog></>;
 }
 
-export function TablePanel({ datasetId, table, onChanged }: { datasetId: string; table: Table; onChanged: () => void }) {
+export function TablePanel({ datasetId, table, onChanged, compact }: { datasetId: string; table: Table; onChanged: () => void; compact?: boolean }) {
   const [tab, setTab] = useState<"data" | "columns">("data");
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
   const [loading, setLoading] = useState(true);
@@ -94,6 +94,29 @@ export function TablePanel({ datasetId, table, onChanged }: { datasetId: string;
     return () => { cancelled = true; };
   }, [table.id, sourceId, sourceModeValue]);
 
+  // ── Compact mode: just the data grid (header/actions in metadata panel) ──
+  if (compact) {
+    return (
+      <div className="flex h-full flex-col">
+        {notice && <div className="alert alert-success alert-soft m-3 text-xs p-2">{notice}</div>}
+        {(error || table.source?.lastError) && <div className="alert alert-error alert-soft m-3 text-xs p-2">{error || table.source?.lastError}</div>}
+        <div className="flex-1 overflow-auto">
+          {loading ? (
+            <div className="flex h-40 items-center justify-center"><span className="loading loading-spinner" /></div>
+          ) : rows.length === 0 ? (
+            <div className="flex h-40 items-center justify-center text-sm text-base-content/40">Nenhuma linha para exibir.</div>
+          ) : (
+            <table className="table table-zebra data-grid w-full">
+              <thead><tr>{table.columns.map(c => <th key={c.id} className="whitespace-nowrap">{c.sqlName}</th>)}</tr></thead>
+              <tbody>{rows.map((row, i) => <tr key={i}>{table.columns.map(c => <td className="whitespace-nowrap" key={c.id}>{fmtCell(row[c.sqlName])}</td>)}</tr>)}</tbody>
+            </table>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Standard mode (standalone page or dataset panel) ──
   return (
     <div className="rounded-box border border-base-300 bg-base-100">
       <div className="flex items-start justify-between gap-3 border-b border-base-300 p-5">
