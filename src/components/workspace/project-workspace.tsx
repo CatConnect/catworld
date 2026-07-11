@@ -1,6 +1,6 @@
 "use client";
 import { useMemo, useState } from "react";
-import { Cable, ChevronRight, Database, DatabaseZap, FolderOpen, Search, Table2 } from "lucide-react";
+import { Cable, ChevronRight, Database, DatabaseZap, FolderOpen, Search, Table2, Terminal } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { CopyableId } from "@/components/ui/copyable-id";
 import { CreateCatalogDialog } from "@/components/management/create-catalog-dialog";
@@ -43,14 +43,14 @@ export function ProjectWorkspace({ project, publicOrigin }: { project: Project; 
         </div>
         <div className="p-2">
           <button onClick={() => setSelection({ kind: "query" })} className={`mb-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm ${selection.kind === "query" ? "bg-primary text-primary-content" : "hover:bg-base-200"}`}>
-            <Search size={15} />Consultar
+            <Terminal size={15} />Consultar SQL
           </button>
           <div className="my-2 border-t border-base-300" />
           {filteredDatasets.map((d) => (
             <div key={d.id}>
               <div className={`flex items-center gap-1 rounded-lg pr-2 text-sm ${selection.kind === "dataset" && selection.datasetId === d.id ? "bg-primary text-primary-content" : "hover:bg-base-200"}`}>
                 <button onClick={() => toggle(d.id)} className="p-2"><ChevronRight size={13} className={`transition-transform ${expanded.has(d.id) ? "rotate-90" : ""}`} /></button>
-                <button onClick={() => setSelection({ kind: "dataset", datasetId: d.id })} className="flex flex-1 items-center gap-2 py-2 text-left"><Database size={15} />{d.name}</button>
+                <button onClick={() => setSelection({ kind: "dataset", datasetId: d.id })} className="flex flex-1 items-center gap-2 py-2 text-left"><Database size={15} /><span className="flex-1 truncate">{d.name}</span><span className="shrink-0 text-xs text-base-content/40">{d.tables.length}</span></button>
               </div>
               {expanded.has(d.id) && (
                 <div className="ml-6 space-y-0.5 border-l border-base-300 pl-2">
@@ -73,15 +73,40 @@ export function ProjectWorkspace({ project, publicOrigin }: { project: Project; 
           <div className="space-y-4">
             <div className="rounded-box border border-base-300 bg-base-100 p-6">
               <div className="flex items-start justify-between gap-3">
-                <div><h2 className="text-lg font-semibold">{project.name}</h2><p className="mt-1 text-sm text-base-content/55">{project.description}</p></div>
+                <div>
+                  <h2 className="text-2xl font-bold">{project.name}</h2>
+                  <p className="mt-1 text-sm text-base-content/55">{project.description ?? <span className="italic">Sem descrição</span>}</p>
+                </div>
                 <EditCatalogDialog kind="project" id={project.id} name={project.name} description={project.description} active={project.active} />
               </div>
-              <div className="mt-3"><CopyableId value={project.id} label="Project ID" /></div>
+              <div className="mt-4"><CopyableId value={project.id} label="Project ID" /></div>
+              <div className="mt-5 grid grid-cols-3 gap-3">
+                {(() => { const ds = project.datasets.length, tb = project.datasets.reduce((n,d)=>n+d.tables.length,0), rows = project.datasets.reduce((n,d)=>d.tables.reduce((m,t)=>m+BigInt(t.rowCount),n),0n); return (<>
+                  <div className="rounded-xl bg-base-200 p-4"><p className="text-2xl font-bold">{ds}</p><p className="mt-1 text-xs text-base-content/50">{ds===1?"dataset":"datasets"}</p></div>
+                  <div className="rounded-xl bg-base-200 p-4"><p className="text-2xl font-bold">{tb}</p><p className="mt-1 text-xs text-base-content/50">{tb===1?"tabela":"tabelas"}</p></div>
+                  <div className="rounded-xl bg-base-200 p-4"><p className="text-2xl font-bold">{rows>1_000_000n?`${(Number(rows)/1e6).toFixed(1)}M`:rows>1_000n?`${(Number(rows)/1e3).toFixed(1)}K`:String(rows)}</p><p className="mt-1 text-xs text-base-content/50">linhas totais</p></div>
+                </>); })()}
+              </div>
             </div>
-            <div className="grid min-h-48 place-items-center rounded-box border border-dashed border-base-300 p-10 text-center text-base-content/50">
-              <FolderOpen className="mx-auto" size={28} />
-              <p className="mt-3 text-sm">Selecione um dataset na lateral para ver tabelas e dados, ou clique em &quot;Consultar&quot; para rodar SQL neste projeto.</p>
-            </div>
+            {project.datasets.length === 0 ? (
+              <div className="grid min-h-40 place-items-center rounded-box border border-dashed border-base-300 p-10 text-center text-base-content/50">
+                <FolderOpen className="mx-auto" size={28} />
+                <p className="mt-3 text-sm">Nenhum dataset ainda. Adicione um dataset para começar.</p>
+              </div>
+            ) : (
+              <div className="rounded-box border border-base-300 bg-base-100 p-5">
+                <h3 className="mb-3 text-sm font-semibold text-base-content/70 uppercase tracking-wide">Datasets</h3>
+                <div className="space-y-1">
+                  {project.datasets.map(d => (
+                    <button key={d.id} onClick={() => setSelection({ kind: "dataset", datasetId: d.id })} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left hover:bg-base-200">
+                      <Database size={16} className="shrink-0 text-primary" />
+                      <span className="flex-1 text-sm font-medium">{d.name}</span>
+                      <span className="text-xs text-base-content/45">{d.tables.length} {d.tables.length===1?"tabela":"tabelas"}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
         {selection.kind === "query" && <QueryPanel datasets={project.datasets} />}
