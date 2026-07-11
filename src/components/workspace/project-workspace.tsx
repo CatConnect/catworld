@@ -7,6 +7,7 @@ import { CreateCatalogDialog } from "@/components/management/create-catalog-dial
 import { EditCatalogDialog } from "@/components/management/edit-catalog-dialog";
 import { TablePanel } from "./table-panel";
 import { QueryPanel } from "./query-panel";
+import { DatasetPanel } from "./dataset-panel";
 
 type Column = { id: string; sqlName: string; originalName: string; sqlType: string; nullable: boolean };
 type TableSource = { id: string; name: string; mode: string; sourceKind: string; sourceSchema: string | null; sourceTable: string | null; refreshPolicy: string; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { id: string; name: string } };
@@ -15,6 +16,7 @@ type Dataset = { id: string; slug: string; name: string; description: string | n
 type Project = { id: string; slug: string; name: string; description: string | null; active: boolean; datasets: Dataset[] };
 
 type Tab =
+  | { id: string; kind: "dataset"; datasetId: string; label: string }
   | { id: string; kind: "table"; datasetId: string; tableId: string; label: string }
   | { id: string; kind: "query"; label: string };
 
@@ -187,6 +189,13 @@ export function ProjectWorkspace({ project, publicOrigin }: { project: Project; 
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("");
 
+  function openDataset(dataset: Dataset) {
+    const tabId = `dataset-${dataset.id}`;
+    if (tabs.find(t => t.id === tabId)) { setActiveTabId(tabId); return; }
+    setTabs(prev => [...prev, { id: tabId, kind: "dataset", datasetId: dataset.id, label: dataset.name }]);
+    setActiveTabId(tabId);
+  }
+
   function openTable(dataset: Dataset, table: Table) {
     const tabId = `table-${table.id}`;
     if (tabs.find(t => t.id === tabId)) { setActiveTabId(tabId); return; }
@@ -219,8 +228,10 @@ export function ProjectWorkspace({ project, publicOrigin }: { project: Project; 
   }
 
   const activeTab = tabs.find(t => t.id === activeTabId) ?? null;
-  const activeDataset = activeTab?.kind === "table" ? project.datasets.find(d => d.id === activeTab.datasetId) : undefined;
-  const activeTable = activeTab?.kind === "table" && activeDataset ? activeDataset.tables.find(t => t.id === activeTab.tableId) : undefined;
+  const activeDataset = (activeTab?.kind === "table" || activeTab?.kind === "dataset")
+    ? project.datasets.find(d => d.id === activeTab.datasetId) : undefined;
+  const activeTable = activeTab?.kind === "table" && activeDataset
+    ? activeDataset.tables.find(t => t.id === activeTab.tableId) : undefined;
 
   const filteredDatasets = useMemo(() => {
     if (!filter.trim()) return project.datasets;
@@ -258,35 +269,33 @@ export function ProjectWorkspace({ project, publicOrigin }: { project: Project; 
         <div className="flex-1 overflow-y-auto px-2 pb-2">
           {filteredDatasets.map(d => (
             <div key={d.id}>
-              <button
-                onClick={() => toggleDataset(d.id)}
-                className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-left text-sm hover:bg-base-200"
-              >
-                <ChevronRight size={13} className={`shrink-0 text-base-content/35 transition-transform ${expanded.has(d.id) ? "rotate-90" : ""}`} />
-                <Database size={14} className="shrink-0 text-primary" />
-                <span className="flex-1 truncate font-medium">{d.name}</span>
-                <span className="text-xs text-base-content/30">{d.tables.length}</span>
-              </button>
-
+              <div className={"flex w-full items-center gap-1 rounded-lg text-sm transition-colors " + (activeTabId === "dataset-" + d.id ? "bg-primary/10 text-primary" : "hover:bg-base-200")}>
+                <button onClick={() => toggleDataset(d.id)} className="shrink-0 p-1.5" aria-label="Expandir">
+                  <ChevronRight size={13} className={"text-base-content/35 transition-transform " + (expanded.has(d.id) ? "rotate-90" : "")} />
+                </button>
+                <button
+                  onClick={() => { openDataset(d); setExpanded(prev => new Set([...prev, d.id])); }}
+                  className="flex flex-1 items-center gap-1.5 overflow-hidden py-1.5 pr-2 text-left"
+                >
+                  <Database size={14} className="shrink-0 text-primary" />
+                  <span className={"flex-1 truncate font-medium " + (activeTabId === "dataset-" + d.id ? "" : "text-base-content")}>{d.name}</span>
+                  <span className="text-xs text-base-content/30">{d.tables.length}</span>
+                </button>
+              </div>
               {expanded.has(d.id) && (
                 <div className="ml-5 border-l border-base-300 pl-2 mb-1">
                   <CopyId label="dataset" id={d.id} className="mb-1" />
-                  {d.tables.map(t => {
-                    const tabId = `table-${t.id}`;
-                    const isActive = activeTabId === tabId;
-                    const isOpen = tabs.some(tab => tab.id === tabId);
-                    return (
-                      <button
-                        key={t.id}
-                        onClick={() => openTable(d, t)}
-                        className={`flex w-full items-center gap-1.5 rounded py-1.5 pl-2 pr-2 text-left text-xs transition-colors ${isActive ? "bg-primary/10 font-medium text-primary" : "text-base-content/60 hover:bg-base-200"}`}
-                      >
-                        {t.source?.mode === "live" ? <Cable size={11} className="shrink-0" /> : t.source?.mode === "extract" ? <DatabaseZap size={11} className="shrink-0" /> : <Table2 size={11} className="shrink-0" />}
-                        <span className="flex-1 truncate">{t.name}</span>
-                        {isOpen && !isActive && <span className="size-1.5 shrink-0 rounded-full bg-primary/40" />}
-                      </button>
-                    );
-                  })}
+                  {d.tables.map(t => (
+                    <button
+                      key={t.id}
+                      onClick={() => openTable(d, t)}
+                      className={"flex w-full items-center gap-1.5 rounded py-1.5 pl-2 pr-2 text-left text-xs transition-colors " + (activeTabId === "table-" + t.id ? "bg-primary/10 font-medium text-primary" : "text-base-content/60 hover:bg-base-200")}
+                    >
+                      {t.source?.mode === "live" ? <Cable size={11} className="shrink-0" /> : t.source?.mode === "extract" ? <DatabaseZap size={11} className="shrink-0" /> : <Table2 size={11} className="shrink-0" />}
+                      <span className="flex-1 truncate">{t.name}</span>
+                      {tabs.some(tab => tab.id === "table-" + t.id) && activeTabId !== "table-" + t.id && <span className="size-1.5 shrink-0 rounded-full bg-primary/40" />}
+                    </button>
+                  ))}
                   {d.tables.length === 0 && <p className="py-1 pl-2 text-[11px] text-base-content/30">Sem tabelas</p>}
                 </div>
               )}
@@ -327,7 +336,7 @@ export function ProjectWorkspace({ project, publicOrigin }: { project: Project; 
               onClick={() => setActiveTabId(tab.id)}
               className={`group flex shrink-0 cursor-pointer select-none items-center gap-1.5 border-r border-base-300 px-3 py-2.5 text-sm transition-colors ${activeTabId === tab.id ? "bg-base-200 font-medium text-base-content" : "text-base-content/50 hover:bg-base-100/60 hover:text-base-content/80"}`}
             >
-              {tab.kind === "query" ? <Terminal size={13} className="shrink-0" /> : <Table2 size={13} className="shrink-0" />}
+              {tab.kind === "query" ? <Terminal size={13} className="shrink-0" /> : tab.kind === "dataset" ? <Database size={13} className="shrink-0 text-primary" /> : <Table2 size={13} className="shrink-0" />}
               <span className="max-w-[140px] truncate">{tab.label}</span>
               <button
                 onClick={e => { e.stopPropagation(); closeTab(tab.id); }}
@@ -346,9 +355,25 @@ export function ProjectWorkspace({ project, publicOrigin }: { project: Project; 
           <div className="min-w-0 flex-1 overflow-auto">
             {!activeTab && (
               <div className="flex h-full flex-col items-center justify-center text-center text-base-content/30 select-none">
-                <Table2 size={36} className="mb-3 opacity-25" />
-                <p className="text-sm">Clique em uma tabela no diretório</p>
+                <Database size={36} className="mb-3 opacity-25" />
+                <p className="text-sm">Selecione um dataset ou tabela no diretório</p>
                 <p className="mt-1 text-xs">ou use Consultar SQL para escrever uma query</p>
+              </div>
+            )}
+
+            {activeTab?.kind === "dataset" && activeDataset && (
+              <div className="p-6 overflow-auto h-full">
+                <DatasetPanel
+                  key={activeDataset.id}
+                  dataset={activeDataset}
+                  projectSlug={project.slug}
+                  publicOrigin={publicOrigin}
+                  onSelectTable={(tableId) => {
+                    const table = activeDataset.tables.find(t => t.id === tableId);
+                    if (table) openTable(activeDataset, table);
+                  }}
+                  onChanged={() => router.refresh()}
+                />
               </div>
             )}
 
