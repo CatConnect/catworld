@@ -156,6 +156,8 @@ async function fail(job: Claimed, error: unknown) {
     } catch { /* ignore */ }
   }
 
+  const sourceFailureUpdate = sourceRefreshFailureUpdate(job, message, retry);
+
   await prisma.$transaction([
     prisma.job.update({
       where: { id: job.id },
@@ -178,12 +180,32 @@ async function fail(job: Claimed, error: unknown) {
         },
       }),
     ] : []),
+    ...(sourceFailureUpdate ? [sourceFailureUpdate] : []),
   ]);
 
   if (restoreRowCount !== undefined) console.log("[FAIL] rowCount=0 → restored %d from previewJson", restoreRowCount);
   console.error("[FAIL] upload=%s attempt=%d/%d error=%s", job.upload_id, job.attempts, job.max_attempts, message);
   const sqlError = error as Error & { number?: number; state?: string };
   if (error instanceof Error && sqlError.number) console.error("[FAIL] sqlNumber=%d sqlState=%s", sqlError.number, sqlError.state ?? "");
+}
+
+function sourceRefreshFailureUpdate(job: Claimed, message: string, retry: boolean) {
+  if (job.type !== "SOURCE_REFRESH") return null;
+  let payload: { datasetSourceId?: string };
+  try {
+    payload = JSON.parse(job.payload_json ?? "{}") as { datasetSourceId?: string };
+  } catch {
+    return null;
+  }
+  if (!payload.datasetSourceId) return null;
+  return prisma.datasetSource.updateMany({
+    where: { id: payload.datasetSourceId },
+    data: {
+      lastStatus: retry ? "queued" : "failed",
+      lastError: message,
+      nextRefreshAt: retry ? undefined : new Date(),
+    },
+  });
 }
 
 async function recoverStale() {

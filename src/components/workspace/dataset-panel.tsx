@@ -34,7 +34,7 @@ function buildGroups(tables: Table[]): SourceGroup[] {
 
   for (const t of tables) {
     const s = t.source;
-    if (!s) continue;
+    if (!s || !s.active) continue;
     if (s.sourceGroupId) {
       if (!batchMap.has(s.sourceGroupId)) batchMap.set(s.sourceGroupId, { sources: [], tables: [] });
       const g = batchMap.get(s.sourceGroupId)!;
@@ -87,9 +87,10 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
 }) {
   const [refreshing, setRefreshing] = useState(false);
   const rep = sources[0]!; // representative source — all share mode/policy/status/connection
+  const activeSources = sources.filter(s => s.active);
 
   // Aggregate status: failed > running/queued > completed > inactive
-  const worstStatus = sources.reduce<"healthy" | "warning" | "error" | "inactive">((acc, s) => {
+  const worstStatus = activeSources.reduce<"healthy" | "warning" | "error" | "inactive">((acc, s) => {
     const k = statusKind(s.lastStatus);
     if (k === "error") return "error";
     if (k === "warning" && acc !== "error") return "warning";
@@ -97,7 +98,7 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
     return acc;
   }, "inactive");
 
-  const allActive = sources.every(s => s.active);
+  const allActive = activeSources.length === sources.length;
 
   async function toggleGroup() {
     await fetch(`/api/v1/source-groups/${groupId}`, {
@@ -109,7 +110,7 @@ function BatchGroupRow({ groupId, datasetId, sources, tables, onSelectTable, onC
 
   async function refreshGroup() {
     setRefreshing(true);
-    await Promise.all(sources.map(s => fetch(`/api/v1/dataset-sources/${s.id}/refresh`, { method: "POST" })));
+    await Promise.all(activeSources.map(s => fetch(`/api/v1/dataset-sources/${s.id}/refresh`, { method: "POST" })));
     setRefreshing(false);
     onChanged();
   }

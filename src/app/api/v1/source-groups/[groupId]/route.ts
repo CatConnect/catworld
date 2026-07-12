@@ -9,7 +9,7 @@ import { nextRefresh, queueSourceRefresh } from "@/server/connections/sources";
 async function authoriseGroup(request: NextRequest, groupId: string) {
   const actor = await resolveActor(request);
   const sources = await prisma.datasetSource.findMany({
-    where: { sourceGroupId: groupId, active: true },
+    where: { sourceGroupId: groupId },
     select: { id: true, datasetId: true, dataset: { select: { projectId: true } } },
   });
   if (!sources.length) throw new ApiError(404, "GROUP_NOT_FOUND", "Grupo de fontes não encontrado");
