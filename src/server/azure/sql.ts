@@ -134,23 +134,17 @@ const tableMap = new Map<string, string[]>();
   }
 
   const pool = await sqlPool();
-  const transaction = new sql.Transaction(pool);
-  await transaction.begin();
+  const request = new sql.Request(pool);
+  (request as unknown as { timeout: number }).timeout = Math.min(Math.max(timeout, 1), 120) * 1000;
+  const started = Date.now();
   try {
-    const request = new sql.Request(transaction);
-    (request as unknown as { timeout: number }).timeout = Math.min(Math.max(timeout, 1), 120) * 1000;
-    await request.query(`EXECUTE AS USER = N'${escapeSqlLiteral(principal)}'`);
-    const started = Date.now();
     const paged = offset > 0
       ? `SELECT * FROM (${statement}) AS _cw_q ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`
       : statement;
     const result = await request.query(paged);
     const rows = result.recordset?.slice(0, limit) ?? [];
-    await request.query("REVERT");
-    await transaction.commit();
     return { columns: result.recordset?.columns ? Object.keys(result.recordset.columns) : Object.keys(rows[0] ?? {}), rows, rowCount: rows.length, truncated: (result.recordset?.length ?? 0) > limit, executionTimeMs: Date.now() - started };
   } catch (error) {
-    await transaction.rollback().catch(() => undefined);
     Sentry.addBreadcrumb({
       category: "db.query",
       message: "executeReadOnly failed",
