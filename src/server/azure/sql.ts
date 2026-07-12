@@ -183,7 +183,9 @@ function extractUnqualifiedTableRefs(sql: string): string[] {
     const ref = match[1]!;
     if (cteNames.has(ref.toLowerCase())) continue;
     const idx = match.index + match[0].lastIndexOf(ref);
-    if (sql[idx - 1] !== ".") results.push(ref);
+    if (sql[idx - 1] === ".") continue; // already schema-qualified (after dot)
+    if (sql[idx + ref.length] === ".") continue; // is a schema name (before dot)
+    results.push(ref);
   }
   return [...new Set(results)];
 }
@@ -206,7 +208,15 @@ function qualifyTable(sql: string, table: string, schema: string): string {
   const pattern = new RegExp(`(?<!\\.)\\b${table.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "gi");
   // Split on SQL string literals (N'...' or '...', with '' escapes) so we don't replace inside them
   const parts = sql.split(/(N?'[^']*(?:''[^']*)*')/gi);
-  return parts.map((part, i) => (i % 2 === 1 ? part : part.replace(pattern, qualified))).join("");
+  return parts.map((part, i) => {
+    if (i % 2 === 1) return part; // string literal — skip
+    return part.replace(pattern, (match, offset) => {
+      // Skip if preceded by AS keyword (column/table alias)
+      const before = part.slice(0, offset).trimEnd();
+      if (/\bAS$/i.test(before)) return match;
+      return qualified;
+    });
+  }).join("");
 }
 
 export async function createExternalDatabaseUser(name: string, password: string) {
