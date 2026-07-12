@@ -69,7 +69,7 @@ export async function listTablesMssql(connection: MssqlConnection, schema?: stri
     const req = pool.request();
     const whereSchema = schema ? (req.input("schema", sql.NVarChar(128), schema), " AND TABLE_SCHEMA=@schema") : "";
     const result = await req.query<{ schema: string; table: string }>(
-      `SELECT TABLE_SCHEMA AS [schema], TABLE_NAME AS [table] FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE'${whereSchema} ORDER BY TABLE_SCHEMA, TABLE_NAME`,
+      `SELECT TABLE_SCHEMA AS [schema], TABLE_NAME AS [table] FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE IN ('BASE TABLE','VIEW')${whereSchema} ORDER BY TABLE_SCHEMA, TABLE_NAME`,
     );
     return result.recordset;
   });

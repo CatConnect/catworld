@@ -1,6 +1,6 @@
 "use client";
 import { useRef, useState } from "react";
-import { Cable, ChevronDown, Database, DatabaseZap, Pencil, Plus, RefreshCw, Table2, ToggleLeft, ToggleRight, Trash2, UploadCloud } from "lucide-react";
+import { Cable, ChevronDown, Database, DatabaseZap, Pencil, Plus, RefreshCw, Search, Table2, ToggleLeft, ToggleRight, Trash2, UploadCloud } from "lucide-react";
 import { CopyableId } from "@/components/ui/copyable-id";
 import { EditCatalogDialog } from "@/components/management/edit-catalog-dialog";
 import { StatusBadge } from "@/components/ui/primitives";
@@ -228,11 +228,12 @@ function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sou
   const [loadingPicker, setLoadingPicker] = useState(false);
   const [availableTables, setAvailableTables] = useState<string[]>([]);
   const [selectedNew, setSelectedNew] = useState<string[]>([]);
+  const [pickerSearch, setPickerSearch] = useState("");
   const [adding, setAdding] = useState(false);
 
   function openDialog() {
     setMode(initMode); setPolicy(initPolicy);
-    setShowPicker(false); setSelectedNew([]); setAvailableTables([]);
+    setShowPicker(false); setSelectedNew([]); setAvailableTables([]); setPickerSearch("");
     dialogRef.current?.showModal();
   }
   function closeDialog() { dialogRef.current?.close(); }
@@ -342,23 +343,48 @@ function GroupEditDialog({ groupId, datasetId, connectionId, connectionName, sou
                   <span className="loading loading-spinner loading-xs" />Carregando tabelas…
                 </div>
               ) : availableTables.length === 0 ? (
-                <p className="py-2 text-xs text-base-content/40">Nenhuma tabela nova disponível neste schema.</p>
+                <p className="py-2 text-xs text-base-content/40">Nenhuma tabela ou view nova disponível neste schema.</p>
               ) : (
                 <>
-                  <div className="max-h-40 overflow-y-auto divide-y divide-base-300 rounded-lg border border-base-300">
-                    {availableTables.map(name => (
-                      <label key={name} className="flex cursor-pointer items-center gap-2 px-3 py-1.5 hover:bg-base-200">
-                        <input type="checkbox" className="checkbox checkbox-xs" checked={selectedNew.includes(name)} onChange={() => toggleNew(name)} />
-                        <span className="text-xs font-mono">{name}</span>
-                      </label>
-                    ))}
-                  </div>
-                  {selectedNew.length > 0 && (
-                    <button className="btn btn-primary btn-xs gap-1 mt-2" disabled={adding} onClick={addTables}>
-                      {adding ? <span className="loading loading-spinner loading-xs" /> : <Plus size={12} />}
-                      {adding ? "Adicionando…" : "Adicionar " + selectedNew.length + (selectedNew.length === 1 ? " tabela" : " tabelas")}
-                    </button>
-                  )}
+                  {(() => {
+                    const filtered = availableTables.filter(n => n.toLowerCase().includes(pickerSearch.toLowerCase()));
+                    const allSelected = filtered.length > 0 && filtered.every(n => selectedNew.includes(n));
+                    function toggleAll() {
+                      if (allSelected) setSelectedNew(prev => prev.filter(n => !filtered.includes(n)));
+                      else setSelectedNew(prev => [...new Set([...prev, ...filtered])]);
+                    }
+                    return (
+                      <>
+                        <div className="mb-2 flex items-center gap-2">
+                          <label className="input input-xs flex flex-1 items-center gap-1.5 border border-base-300">
+                            <Search size={11} className="text-base-content/40" />
+                            <input type="text" className="grow" placeholder="Pesquisar..." value={pickerSearch} onChange={e => setPickerSearch(e.target.value)} />
+                          </label>
+                          <label className="flex cursor-pointer items-center gap-1 text-xs text-base-content/60 select-none whitespace-nowrap">
+                            <input type="checkbox" className="checkbox checkbox-xs" checked={allSelected} onChange={toggleAll} disabled={filtered.length === 0} />
+                            Todas
+                          </label>
+                        </div>
+                        <div className="max-h-40 overflow-y-auto divide-y divide-base-300 rounded-lg border border-base-300">
+                          {filtered.length === 0
+                            ? <p className="px-3 py-2 text-xs text-base-content/40">Sem resultados para "{pickerSearch}".</p>
+                            : filtered.map(name => (
+                              <label key={name} className="flex cursor-pointer items-center gap-2 px-3 py-1.5 hover:bg-base-200">
+                                <input type="checkbox" className="checkbox checkbox-xs" checked={selectedNew.includes(name)} onChange={() => toggleNew(name)} />
+                                <span className="text-xs font-mono">{name}</span>
+                              </label>
+                            ))
+                          }
+                        </div>
+                        {selectedNew.length > 0 && (
+                          <button className="btn btn-primary btn-xs gap-1 mt-2" disabled={adding} onClick={addTables}>
+                            {adding ? <span className="loading loading-spinner loading-xs" /> : <Plus size={12} />}
+                            {adding ? "Adicionando…" : "Adicionar " + selectedNew.length + (selectedNew.length === 1 ? " tabela" : " tabelas")}
+                          </button>
+                        )}
+                      </>
+                    );
+                  })()}
                 </>
               )}
             </div>

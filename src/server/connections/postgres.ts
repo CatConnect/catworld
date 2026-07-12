@@ -70,7 +70,7 @@ export async function listTables(connection: PgConnection, schema?: string) {
     const result = await client.query<{ schema: string; table: string }>(
       `SELECT table_schema AS schema, table_name AS table
        FROM information_schema.tables
-       WHERE table_type='BASE TABLE'
+       WHERE table_type IN ('BASE TABLE','VIEW')
          AND table_schema NOT IN ('pg_catalog','information_schema')
          AND ($1::text IS NULL OR table_schema=$1)
        ORDER BY table_schema, table_name`,

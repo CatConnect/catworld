@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { Cable, CheckCircle2, DatabaseZap, Play, Plus, RefreshCw, Table2 } from "lucide-react";
+import { Cable, CheckCircle2, DatabaseZap, Play, Plus, RefreshCw, Search, Table2 } from "lucide-react";
 
 type Connection = { id: string; name: string; server: string; databaseName: string };
 type SchemaRow = { schema: string };
@@ -33,12 +33,13 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
   const [refreshPolicy, setRefreshPolicy] = useState("manual");
   const [queryName, setQueryName] = useState("");
   const [sourceSql, setSourceSql] = useState("SELECT *\nFROM ");
+  const [tableSearch, setTableSearch] = useState("");
   const [loading, setLoading] = useState(false);
   const [loadingMeta, setLoadingMeta] = useState(false);
   const [error, setError] = useState("");
 
   async function open() {
-    setStep("origin"); setError(""); setColumns([]); setSelectedTables([]); setQueryStatus("idle"); setQueryTestedSql("");
+    setStep("origin"); setError(""); setColumns([]); setSelectedTables([]); setQueryStatus("idle"); setQueryTestedSql(""); setTableSearch("");
     ref.current?.showModal();
     setLoadingMeta(true);
     const response = await fetch("/api/v1/connections");
@@ -159,10 +160,42 @@ export function SourceDialog({ datasetId, onComplete }: { datasetId: string; onC
                   <>
                     <Field label="Schema"><select className="select w-full" value={schema} onChange={(e) => setSchema(e.target.value)}>{schemas.map((s) => <option key={s.schema}>{s.schema}</option>)}</select></Field>
                     <div className="lg:col-span-2">
-                      <div className="mb-2 flex items-center justify-between"><span className="text-sm font-medium">Tabelas</span><span className="text-xs text-base-content/55">{selectedTables.length} selecionada(s)</span></div>
-                      <div className="max-h-72 overflow-auto rounded-box border border-base-300">
-                        {tables.length === 0 ? <div className="p-4 text-sm text-base-content/50">Nenhuma tabela encontrada neste schema.</div> : tables.map((t) => <label key={`${t.schema}.${t.table}`} className="flex cursor-pointer items-center gap-3 border-b border-base-300 px-4 py-2 text-sm last:border-b-0 hover:bg-base-200"><input type="checkbox" className="checkbox checkbox-sm" checked={selectedTables.includes(t.table)} onChange={() => toggleTable(t.table)} /><span className="font-mono text-xs">{t.table}</span></label>)}
-                      </div>
+                      {(() => {
+                        const filtered = tables.filter(t => t.table.toLowerCase().includes(tableSearch.toLowerCase()));
+                        const allFilteredSelected = filtered.length > 0 && filtered.every(t => selectedTables.includes(t.table));
+                        function toggleAll() {
+                          if (allFilteredSelected) setSelectedTables(prev => prev.filter(n => !filtered.some(t => t.table === n)));
+                          else setSelectedTables(prev => [...new Set([...prev, ...filtered.map(t => t.table)])]);
+                        }
+                        return (
+                          <>
+                            <div className="mb-2 flex items-center gap-2">
+                              <label className="input input-sm flex flex-1 items-center gap-2 border border-base-300">
+                                <Search size={13} className="text-base-content/40" />
+                                <input type="text" className="grow" placeholder="Pesquisar tabela/view..." value={tableSearch} onChange={e => setTableSearch(e.target.value)} />
+                              </label>
+                              <label className="flex cursor-pointer items-center gap-1.5 text-xs text-base-content/60 select-none whitespace-nowrap">
+                                <input type="checkbox" className="checkbox checkbox-xs" checked={allFilteredSelected} onChange={toggleAll} disabled={filtered.length === 0} />
+                                Selecionar todas
+                              </label>
+                              <span className="text-xs text-base-content/40 whitespace-nowrap">{selectedTables.length} sel.</span>
+                            </div>
+                            <div className="max-h-64 overflow-auto rounded-box border border-base-300">
+                              {tables.length === 0
+                                ? <div className="p-4 text-sm text-base-content/50">Nenhuma tabela ou view encontrada neste schema.</div>
+                                : filtered.length === 0
+                                  ? <div className="p-4 text-sm text-base-content/50">Nenhum resultado para "{tableSearch}".</div>
+                                  : filtered.map(t => (
+                                    <label key={t.schema + "." + t.table} className="flex cursor-pointer items-center gap-3 border-b border-base-300 px-4 py-2 text-sm last:border-b-0 hover:bg-base-200">
+                                      <input type="checkbox" className="checkbox checkbox-sm" checked={selectedTables.includes(t.table)} onChange={() => toggleTable(t.table)} />
+                                      <span className="font-mono text-xs">{t.table}</span>
+                                    </label>
+                                  ))
+                              }
+                            </div>
+                          </>
+                        );
+                      })()}
                     </div>
                   </>
                 ) : (
