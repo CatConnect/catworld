@@ -95,7 +95,7 @@ export async function tableColumnsMssql(connection: MssqlConnection, schema: str
 export async function queryColumnsMssql(connection: MssqlConnection, query: string): Promise<SourceColumn[]> {
   const statement = safeStatementMssql(query);
   return withMssql(connection, async (pool) => {
-    const result = await pool.request().query(`SELECT TOP 0 * FROM (${statement}) cw_source_probe`);
+    const result = await pool.request().query(probeStatementMssql(statement));
     const cols = result.recordset.columns as Record<string, { name: string; type: unknown; nullable?: boolean }> | undefined;
     if (!cols) return [];
     return Object.values(cols).map((col) => ({
@@ -129,6 +129,18 @@ export async function executeMssqlReadOnly(connection: MssqlConnection, query: s
   } finally {
     await pool.close().catch(() => undefined);
   }
+}
+
+function probeStatementMssql(statement: string): string {
+  const trimmed = statement.trimStart();
+  if (/^with\b/i.test(trimmed)) {
+    const split = splitFinalSelect(trimmed);
+    if (split) {
+      const prefix = split.prefix.replace(/,\s*$/, "");
+      return `${prefix}, cw_probe AS (${split.finalSelect}) SELECT TOP 0 * FROM cw_probe`;
+    }
+  }
+  return `SELECT TOP 0 * FROM (${statement}) cw_source_probe`;
 }
 
 function paginateMssql(statement: string, offset: number, batchSize: number): string {
