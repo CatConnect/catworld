@@ -144,8 +144,9 @@ export async function refreshDatasetSource(datasetSourceId: string) {
   const baseTableQuery = source.sourceKind === "table"
     ? `SELECT * FROM ${isMssql ? quotedMssqlTable(source.sourceSchema!, source.sourceTable!) : quotedPgTable(source.sourceSchema!, source.sourceTable!)}`
     : source.sourceSql!;
+  const quoteCol = (col: string) => isMssql ? `[${col.replace(/]/g, "]]")}]` : `"${col.replace(/"/g, '""')}"`;
   const query = useDelta
-    ? `${baseTableQuery} WHERE ${quoteIdentifier(source.deltaColumn!)} > '${source.lastDeltaValue!.replace(/'/g, "''")}'`
+    ? `${baseTableQuery} WHERE ${quoteCol(source.deltaColumn!)} > '${source.lastDeltaValue!.replace(/'/g, "''")}'`
     : baseTableQuery;
 
   const columns = source.sourceKind === "table"
