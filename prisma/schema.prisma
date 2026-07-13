@@ -179,6 +179,7 @@ model DatasetSource {
   sourceTable     String?       @map("source_table") @db.NVarChar(128)
   sourceSql       String?       @map("source_sql") @db.NVarChar(Max)
   refreshPolicy   String        @default("manual") @map("refresh_policy") @db.VarChar(20)
+  keyColumn       String?       @map("key_column") @db.VarChar(128)
   lastStatus      String?       @map("last_status") @db.VarChar(32)
   lastRowCount    BigInt?       @map("last_row_count")
   lastError       String?       @map("last_error") @db.NVarChar(Max)

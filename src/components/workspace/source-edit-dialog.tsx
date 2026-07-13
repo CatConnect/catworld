@@ -9,6 +9,7 @@ type Source = {
   name: string;
   mode: string;
   refreshPolicy: string;
+  keyColumn: string | null;
   sourceKind: string;
   sourceSql?: string | null;
   connection: { id: string; name: string };
@@ -19,6 +20,7 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
   const [name, setName] = useState(source.name);
   const [mode, setMode] = useState(source.mode);
   const [policy, setPolicy] = useState(source.refreshPolicy);
+  const [keyColumn, setKeyColumn] = useState(source.keyColumn ?? "");
   const [sql, setSql] = useState(source.sourceSql ?? "");
   const [sqlTested, setSqlTested] = useState(source.sourceSql ?? "");
   const [sqlStatus, setSqlStatus] = useState<"idle" | "ok" | "error">("ok");
@@ -31,6 +33,7 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
     setName(source.name);
     setMode(source.mode);
     setPolicy(source.refreshPolicy);
+    setKeyColumn(source.keyColumn ?? "");
     setSql(source.sourceSql ?? "");
     setSqlTested(source.sourceSql ?? "");
     setSqlStatus("ok");
@@ -59,6 +62,7 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
       name: name.trim(),
       mode,
       refreshPolicy: mode === "live" ? "manual" : policy,
+      keyColumn: keyColumn.trim() || null,
     };
     if (source.sourceKind === "query") body.sourceSql = sql;
     const response = await fetch(`/api/v1/dataset-sources/${source.id}`, {
@@ -146,6 +150,22 @@ export function SourceEditDialog({ source, onComplete }: { source: Source; onCom
               </select>
               {mode === "live" && <span className="label-text-alt mt-1 text-base-content/55">Fontes ao vivo sempre consultam a origem na hora.</span>}
             </label>
+
+            {/* Key column — only for extract mode */}
+            {mode === "extract" && (
+              <label className="form-control w-full">
+                <span className="label-text font-medium">Coluna-chave para upsert <span className="font-normal text-base-content/50">(opcional)</span></span>
+                <input
+                  className="input mt-1 w-full font-mono text-sm"
+                  placeholder="ex: id"
+                  value={keyColumn}
+                  onChange={(e) => setKeyColumn(e.target.value)}
+                />
+                <span className="label-text-alt mt-1 text-base-content/55">
+                  Se definida, cada atualização faz upsert pela chave em vez de substituir a tabela inteira.
+                </span>
+              </label>
+            )}
           </div>
 
           {error && <div className="alert alert-error alert-soft mt-4 text-sm">{error}</div>}

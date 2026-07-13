@@ -52,6 +52,7 @@ export async function createDatasetSource(input: {
   sourceTable?: string | null;
   sourceSql?: string | null;
   refreshPolicy: RefreshPolicy;
+  keyColumn?: string | null;
   sourceGroupId?: string;
 }) {
   const [dataset, connection] = await Promise.all([
@@ -90,6 +91,7 @@ export async function createDatasetSource(input: {
       sourceSchema: input.sourceSchema ?? null,
       sourceTable: input.sourceTable ?? null,
       sourceSql: input.sourceSql ?? null,
+      keyColumn: input.keyColumn ?? null,
       refreshPolicy: input.mode === "live" ? "manual" : input.refreshPolicy,
       lastStatus: input.mode === "live" ? "ready" : "queued",
       nextRefreshAt: input.mode === "extract" ? nextRefresh(input.refreshPolicy) : null,
@@ -162,8 +164,20 @@ export async function refreshDatasetSource(datasetSourceId: string) {
     await tx.begin();
     try {
       const req = new sql.Request(tx);
-      if (await targetExists(req, schema, table)) await req.query(`DROP TABLE ${target}`);
-      await req.query(`EXEC sp_rename '${schema}.${stage}', '${table}'`);
+      const hasTarget = await targetExists(req, schema, table);
+      if (source.keyColumn && hasTarget) {
+        // Upsert: DELETE matched rows by key + INSERT from staging (faster than MERGE)
+        const key = quoteIdentifier(source.keyColumn);
+        const colList = columns.map((c) => quoteIdentifier(c.sqlName)).join(",");
+        await req.query(`
+          DELETE t FROM ${target} t WHERE EXISTS (SELECT 1 FROM ${staging} s WHERE t.${key} = s.${key});
+          INSERT INTO ${target} (${colList}) SELECT ${colList} FROM ${staging};
+          DROP TABLE ${staging};
+        `);
+      } else {
+        if (hasTarget) await req.query(`DROP TABLE ${target}`);
+        await req.query(`EXEC sp_rename '${schema}.${stage}', '${table}'`);
+      }
       await tx.commit();
     } catch (e) {
       await tx.rollback().catch(() => undefined);
