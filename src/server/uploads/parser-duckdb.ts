@@ -30,8 +30,11 @@ export async function* rowsFromCsvDuckDB(
   const safeFilePath = filePath.replace(/\\/g, "/").replace(/'/g, "''");
 
   // Get actual column names from DuckDB to build originalName → sqlName mapping
+  // parallel=false is required when null_padding=true and the file has quoted newlines;
+  // without it DuckDB throws "parallel scanner does not support null_padding with quoted newlines".
+  const csvOpts = `sample_size=-1, null_padding=true, parallel=false, all_varchar=true`;
   const headerResult = await conn.runAndReadAll(
-    `SELECT * FROM read_csv_auto('${safeFilePath}', sample_size=-1, null_padding=true, all_varchar=true) LIMIT 0`,
+    `SELECT * FROM read_csv_auto('${safeFilePath}', ${csvOpts}) LIMIT 0`,
   );
   const duckHeaders: string[] = [];
   for (let i = 0; i < headerResult.columnCount; i++) {
@@ -60,7 +63,7 @@ export async function* rowsFromCsvDuckDB(
     // all_varchar=true: return raw strings, no type casting — same as csv-parse behaviour.
     // Without this, DuckDB converts "10.50" → 10.5 and dates to ISO, breaking downstream logic.
     const reader = await conn.stream(
-      `SELECT * FROM read_csv_auto('${safeFilePath}', sample_size=-1, null_padding=true, all_varchar=true)`,
+      `SELECT * FROM read_csv_auto('${safeFilePath}', ${csvOpts})`,
     );
 
     for await (const chunk of reader) {
