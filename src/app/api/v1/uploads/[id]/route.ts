@@ -1,19 +1,10 @@
 ﻿import type { NextRequest } from "next/server";
-import { createGunzip } from "node:zlib";
-import { createWriteStream, createReadStream } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { extname, join } from "node:path";
-import { Readable, pipeline as streamPipeline } from "node:stream";
-import { promisify } from "node:util";
 import { prisma } from "@/server/db";
 import { resolveActor } from "@/server/auth/actor";
 import { hasAnyWriteGrant } from "@/server/auth/permissions";
-import { writeFile, copyFile } from "@/server/storage";
 import { ApiError, handleApiError, ok } from "@/server/http";
 import { confirmUploadSchema, queueImportUpload, queuePreviewUpload } from "@/server/uploads/actions";
-
-const pipeline = promisify(streamPipeline);
+import { storeUploadBody } from "@/server/uploads/store-upload-body";
 
 export async function GET(r: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -31,30 +22,7 @@ export async function PUT(r: NextRequest, { params }: { params: Promise<{ id: st
     const upload = await prisma.upload.findUniqueOrThrow({ where: { id: (await params).id } });
     if (!r.body) throw new ApiError(400, "EMPTY_BODY", "Corpo da requisição vazio");
 
-    // Gzip: decompress to a temp file via pipeline() to avoid backpressure issues
-    // with the Web RS ↔ Node.js stream conversion chain (loses data for files > 8MB).
-    if (r.headers.get("content-encoding") === "gzip") {
-      const dir = await mkdtemp(join(tmpdir(), "cw-put-"));
-      try {
-        const tmpPath = join(dir, "upload.tmp");
-        await pipeline(
-          Readable.fromWeb(r.body as Parameters<typeof Readable.fromWeb>[0]),
-          createGunzip(),
-          createWriteStream(tmpPath),
-        );
-        await writeFile(upload.blobName, Readable.toWeb(createReadStream(tmpPath)) as ReadableStream<Uint8Array>);
-      } finally {
-        await rm(dir, { recursive: true, force: true }).catch(() => {});
-      }
-    } else {
-      await writeFile(upload.blobName, r.body);
-    }
-    // Immediately copy to originals/ so the blob survives any lifecycle policy on uploads/ prefix
-    const ext = extname(upload.originalFilename).toLowerCase();
-    await copyFile(upload.blobName, `originals/${upload.id}${ext}`).catch((e) => {
-      console.error("[PUT upload] originals/ copy failed for", upload.id, e instanceof Error ? e.message : e);
-    });
-    return ok({ stored: true });
+    return ok(await storeUploadBody(upload, r.body, r.headers.get("content-encoding")));
   } catch (e) {
     return handleApiError(e);
   }
