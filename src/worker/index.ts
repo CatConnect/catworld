@@ -1,6 +1,6 @@
 import { createWriteStream } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { spawn } from "node:child_process";
@@ -284,7 +284,7 @@ async function recoverStale() {
 }
 
 async function loop(concurrencyId: number) {
-  const workerLabel = `${env().CATWORLD_WORKER_ID}-${concurrencyId}`;
+  const workerLabel = `${env().CATWORLD_WORKER_ID}-${concurrencyId}@${hostname()}`;
   console.log(`[worker] ${workerLabel} iniciado`);
   const maxHeavy = env().CATWORLD_MAX_HEAVY_JOBS;
   while (!stopping) {
@@ -304,11 +304,15 @@ async function loop(concurrencyId: number) {
 async function releaseSelf() {
   const workerId = env().CATWORLD_WORKER_ID;
   const concurrency = env().CATWORLD_WORKER_CONCURRENCY;
-  const labels = Array.from({ length: concurrency }, (_, i) => `'${workerId}-${i + 1}'`).join(",");
+  // Match worker-N-1@hostname, worker-N-2@hostname, etc. — LIKE handles the @hostname suffix.
+  const likeConditions = Array.from(
+    { length: concurrency },
+    (_, i) => `locked_by LIKE '${workerId}-${i + 1}@%' OR locked_by='${workerId}-${i + 1}'`,
+  ).join(" OR ");
   const released = await prisma.$executeRawUnsafe(
     `UPDATE dbo.cw_jobs
      SET status='QUEUED', locked_at=NULL, locked_by=NULL, heartbeat_at=NULL, available_at=SYSUTCDATETIME()
-     WHERE status='RUNNING' AND locked_by IN (${labels})`,
+     WHERE status='RUNNING' AND (${likeConditions})`,
   );
   if (released > 0) console.log(`[worker] startup: ${released} job(s) do worker anterior liberados`);
 }

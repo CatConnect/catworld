@@ -557,6 +557,18 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       }
     }
 
+    // ── Integrity guard ───────────────────────────────────────────────────────
+    // For full replace (no delta, no phase2), physical row count MUST equal the number of
+    // rows parsed from the file (written to clean blob / staging).  A mismatch means BULK
+    // INSERT or the staging INSERT SELECT silently dropped rows — never mark COMPLETED.
+    const isFullReplace = (upload.mode === "replace" || !targetExists) && !deltaReplace && !phase2;
+    if (isFullReplace && actual !== BigInt(total)) {
+      throw new Error(
+        `[integrity] Contagem inconsistente: arquivo produziu ${total} linhas mas tabela física tem ${actual.toString()} linhas. ` +
+        `Upload marcado FAILED para evitar publicação de dados desatualizados.`,
+      );
+    }
+
     // ── Metadata updates (both paths) ─────────────────────────────────────────
     const MAX_BIGINT = 9223372036854775807n;
     if (actual > MAX_BIGINT || actual < 0n)
@@ -571,6 +583,9 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
       create: { datasetId: upload.dataset.id, name: tableName, sqlName: tableName },
     });
 
+    phaseTimings.previewRows = knownRowCount;
+    phaseTimings.parsedRows = total;
+    phaseTimings.physicalRows = Number(actual);
     phaseTimings.totalImportMs = Date.now() - importStarted;
     console.log("[importUpload:perf]", JSON.stringify({ uploadId: upload.id, file: upload.originalFilename, rows: Number(actual), ...phaseTimings }));
 
