@@ -235,7 +235,8 @@ export async function bulkInsertFromBlob(
         KEEPNULLS,
         TABLOCK,
         CODEPAGE = '65001',
-        ROWS_PER_BATCH = 50000
+        ROWS_PER_BATCH = 50000,
+        MAXERRORS = 0
       )
     `;
 
