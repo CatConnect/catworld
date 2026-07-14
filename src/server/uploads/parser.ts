@@ -1,5 +1,8 @@
-import { createReadStream } from "node:fs";
-import { extname } from "node:path";
+import { createReadStream, createWriteStream } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { extname, join } from "node:path";
+import { pipeline } from "node:stream/promises";
 import type { Stream } from "node:stream";
 import { parse } from "csv-parse";
 import iconv from "iconv-lite";
@@ -137,7 +140,26 @@ export async function* rowsFromFile(
   // DuckDB CSV reader only supports UTF-8/UTF-16 — non-UTF-8 files go directly to csv-parse.
   if(typeof source==="string"){
    const fileEncoding=opts?.encoding??((await detectFileHints(source)).encoding);
-   if(fileEncoding==="utf8"){
+   // For non-UTF-8 files: transcode to a temp UTF-8 file so DuckDB (UTF-8 only) can read it.
+   // This gives DuckDB speed even for win1252/latin1 files — csv-parse is the last resort.
+   const {separator} = await detectFileHints(source);
+   if(fileEncoding!=="utf8"){
+    const tmpDir=await mkdtemp(join(tmpdir(),"cw-duckdb-"));
+    const tmpFile=join(tmpDir,"converted.csv");
+    let usedDuckDB=false;
+    try{
+     await pipeline(createReadStream(source),iconv.decodeStream(fileEncoding),createWriteStream(tmpFile,{encoding:"utf8"}));
+     const{rowsFromCsvDuckDB}=await import("./parser-duckdb");
+     yield* rowsFromCsvDuckDB(tmpFile,columns);
+     usedDuckDB=true;
+    }catch(e){
+     if(!usedDuckDB)console.warn("[parser] DuckDB (non-UTF8 transcoded) falhou, usando csv-parse:",e instanceof Error?e.message:e);
+     else throw e;
+    }finally{
+     await rm(tmpDir,{recursive:true,force:true}).catch(()=>{});
+    }
+    if(usedDuckDB)return;
+   }else{
     try{
      const{rowsFromCsvDuckDB}=await import("./parser-duckdb");
      yield* rowsFromCsvDuckDB(source,columns);
@@ -146,8 +168,7 @@ export async function* rowsFromFile(
      console.warn("[parser] DuckDB falhou, usando csv-parse como fallback:",e instanceof Error?e.message:e);
     }
    }
-   // Non-UTF-8 or DuckDB error: use csv-parse with the already-detected hints
-   const {separator} = await detectFileHints(source);
+   // csv-parse fallback (DuckDB failed or unavailable)
    const readable=createReadStream(source);
    let header=true;
    for await(const row of csvPipeStream(readable,fileEncoding,separator)){
