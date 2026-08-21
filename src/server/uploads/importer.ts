@@ -3,6 +3,8 @@ import { extname } from "node:path";
 import sql from "mssql";
 import { prisma } from "@/server/db";
 import { sqlPool } from "@/server/azure/sql";
+import { getStoragePool } from "@/server/storage/pool";
+import { getStorageConnection } from "@/server/storage/connection";
 import { quoteIdentifier, sqlIdentifier } from "@/server/security/naming";
 import { previewFile, rowsFromFile, type FilePreview, type ParsedColumn, type RowsFromFileOpts, type ParseStats } from "./parser";
 import { bulkInsertFromBlob, sanitizeCsvField } from "./importer-bulk-blob";
@@ -175,6 +177,19 @@ async function tdsBulkCopy(
 
 // ─── Main import entry point ───────────────────────────────────────────────────
 export async function importUpload(uploadId: string, source: string | NodeJS.ReadableStream) {
+  // Roteamento por provider: PG usa importer dedicado, mssql usa o caminho abaixo
+  const upload0 = await prisma.upload.findUniqueOrThrow({
+    where: { id: uploadId },
+    include: { dataset: { select: { storageServerId: true } } },
+  });
+  const conn0 = await getStorageConnection(upload0.dataset?.storageServerId ?? null);
+  if (conn0.provider === "postgres") {
+    const { importUploadPg } = await import("./importer-pg");
+    const { PgStorageConnection } = await import("@/server/storage/pg-storage");
+    return importUploadPg(uploadId, source, conn0 as InstanceType<typeof PgStorageConnection>);
+  }
+  // ─── SQL Server path (código original abaixo) ─────────────────────────────────
+
   const importStarted = Date.now();
   const phaseTimings: Record<string, unknown> = {};
   const parseStats: ParseStats = {};
@@ -192,7 +207,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
   const tableName = upload.table?.sqlName ?? sqlIdentifier(upload.originalFilename.replace(/\.[^.]+$/, ""));
   const schema = upload.dataset.schemaName;
   const stage = `cw_stage_${upload.id.replaceAll("-", "").slice(0, 20)}`;
-  const pool = await sqlPool();
+  const pool = await getStoragePool(upload.dataset.storageServerId);
   const target = `${quoteIdentifier(schema)}.${quoteIdentifier(tableName)}`;
   const staging = `${quoteIdentifier(schema)}.${quoteIdentifier(stage)}`;
 
@@ -293,7 +308,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
 
       try {
         const orResult = await bulkInsertFromBlob(
-          uploadId, source, mapping, schema, directTmp, opts, onProgress, false, knownRowCount, parseStats,
+          uploadId, source, mapping, schema, directTmp, opts, onProgress, false, knownRowCount, parseStats, pool,
         );
         total = orResult.total;
         inserted = total;
@@ -366,7 +381,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
           const cleanBlobName = `bulkimport/${uploadId}.csv`;
           try {
             const blobResult = await bulkInsertFromBlob(
-              uploadId, source, mapping, schema, destTable, opts, onProgress, phase2, knownRowCount, parseStats,
+              uploadId, source, mapping, schema, destTable, opts, onProgress, phase2, knownRowCount, parseStats, pool,
             );
             total = blobResult.total;
             phaseTimings.importMethod = "blob-bulk";
@@ -446,7 +461,7 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
             catch { blobSrc = await downloadFile(upload.blobName); }
 
             const blobResult = await bulkInsertFromBlob(
-              uploadId, blobSrc, mapping, schema, destTable, opts, onProgress, false, knownRowCount, parseStats,
+              uploadId, blobSrc, mapping, schema, destTable, opts, onProgress, false, knownRowCount, parseStats, pool,
             );
             total = blobResult.total;
             phaseTimings.bulkBlob = blobResult;
@@ -653,46 +668,53 @@ export async function importUpload(uploadId: string, source: string | NodeJS.Rea
     phaseTimings.rowsPerSecond = totalMs > 0 ? Math.round(total / (totalMs / 1000)) : null;
     console.log("[importUpload:perf]", JSON.stringify({ uploadId: upload.id, file: upload.originalFilename, rows: Number(actual), ...phaseTimings }));
 
-    // Batch column metadata inserts to stay under SQL Server 2100-parameter limit
-    const MAX_COLS_PER_BATCH = 500;
-    for (let batchStart = 0; batchStart < mapping.length; batchStart += MAX_COLS_PER_BATCH) {
-      const batch = mapping.slice(batchStart, batchStart + MAX_COLS_PER_BATCH);
-      const colReq = pool.request();
-      colReq.input("tableId", sql.UniqueIdentifier, table.id);
-      colReq.input("uploadId", sql.UniqueIdentifier, upload.id);
-      colReq.input("actual", sql.BigInt, actual);
-      colReq.input("inserted", sql.BigInt, inserted);
-      colReq.input("updated", sql.BigInt, updated);
-      colReq.input("schemaJson", sql.NVarChar(sql.MAX), JSON.stringify(mapping));
-      colReq.input("detailJson", sql.NVarChar(sql.MAX), JSON.stringify({ file: upload.originalFilename, rows: Number(actual), ...phaseTimings }));
-      const colValues = batch.map((c, i) => {
-        const gi = batchStart + i;
-        colReq.input(`orig${gi}`, sql.NVarChar(255), c.originalName);
-        colReq.input(`sqlName${gi}`, sql.VarChar(128), c.sqlName);
-        colReq.input(`sqlType${gi}`, sql.VarChar(100), c.sqlType);
-        colReq.input(`nullable${gi}`, sql.Bit, c.nullable);
-        return `(NEWID(),@tableId,${gi + 1},@orig${gi},@sqlName${gi},@sqlType${gi},@nullable${gi})`;
-      }).join(",");
-      const isFirst = batchStart === 0;
-      await colReq.query(`
-        BEGIN TRANSACTION
-        ${isFirst ? `DECLARE @lk INT
-        EXEC @lk=sp_getapplock @Resource='ColUpd_${table.id}',@LockMode='Exclusive',@LockTimeout=120000
-        IF @lk<0 THROW 50000,'lock timeout',1
-        DELETE FROM dbo.cw_columns WHERE table_id=@tableId` : ""}
-        INSERT INTO dbo.cw_columns(id,table_id,ordinal,original_name,sql_name,sql_type,nullable)
-          VALUES${colValues}
-        ${isFirst ? `UPDATE dbo.cw_tables SET row_count=@actual,last_data_at=SYSUTCDATETIME(),updated_at=SYSUTCDATETIME() WHERE id=@tableId
-        INSERT INTO dbo.cw_dataset_versions(id,table_id,upload_id,row_count,schema_json)
-          VALUES(NEWID(),@tableId,@uploadId,@actual,@schemaJson)
-        INSERT INTO dbo.cw_audit_events(id,event_type,resource_type,resource_id,detail_json,success)
-          VALUES(NEWID(),'UPLOAD_IMPORT_PERF','upload',@uploadId,@detailJson,1)
-        UPDATE dbo.cw_uploads SET table_id=@tableId,status='COMPLETED',progress=100,
-          row_count=@actual,inserted_count=@inserted,updated_count=@updated,
-          error_message=NULL,updated_at=SYSUTCDATETIME() WHERE id=@uploadId` : ""}
-        COMMIT
-      `);
-    }
+    // Update metadata in Postgres via Prisma (single transaction)
+    await prisma.$transaction([
+      prisma.datasetColumn.deleteMany({ where: { tableId: table.id } }),
+      prisma.datasetColumn.createMany({
+        data: mapping.map((c, i) => ({
+          tableId: table.id,
+          ordinal: i + 1,
+          originalName: c.originalName,
+          sqlName: c.sqlName,
+          sqlType: c.sqlType,
+          nullable: c.nullable,
+        })),
+      }),
+      prisma.datasetTable.update({
+        where: { id: table.id },
+        data: { rowCount: actual, lastDataAt: new Date() },
+      }),
+      prisma.datasetVersion.create({
+        data: {
+          tableId: table.id,
+          uploadId: upload.id,
+          rowCount: actual,
+          schemaJson: JSON.stringify(mapping),
+        },
+      }),
+      prisma.auditEvent.create({
+        data: {
+          eventType: "UPLOAD_IMPORT_PERF",
+          resourceType: "upload",
+          resourceId: upload.id,
+          detailJson: JSON.stringify({ file: upload.originalFilename, rows: Number(actual), ...phaseTimings }),
+          success: true,
+        },
+      }),
+      prisma.upload.update({
+        where: { id: upload.id },
+        data: {
+          tableId: table.id,
+          status: "COMPLETED",
+          progress: 100,
+          rowCount: actual,
+          insertedCount: inserted,
+          updatedCount: updated,
+          errorMessage: null,
+        },
+      }),
+    ]);
 
     return { tableId: table.id, inserted, updated, rowCount: actual };
   } catch (e) {

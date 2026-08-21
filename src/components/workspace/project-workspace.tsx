@@ -1,6 +1,6 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
-import { Cable, Check, ChevronRight, Copy, Database, DatabaseZap, RefreshCw, Search, Table2, Terminal, Trash2, TriangleAlert, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Cable, Check, ChevronRight, Copy, Database, DatabaseZap, RefreshCw, Search, Server, Table2, Terminal, Trash2, TriangleAlert, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { StatusBadge } from "@/components/ui/primitives";
 import { CreateCatalogDialog } from "@/components/management/create-catalog-dialog";
@@ -13,8 +13,9 @@ type Column = { id: string; sqlName: string; originalName: string; sqlType: stri
 type TableSource = { id: string; name: string; mode: string; sourceKind: string; sourceGroupId: string | null; sourceSchema: string | null; sourceTable: string | null; sourceSql: string | null; refreshCron: string | null; keyColumn: string | null; deltaColumn: string | null; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; connection: { id: string; name: string } };
 type Table = { id: string; name: string; sqlName: string; rowCount: string; lastDataAt: string | null; source: TableSource | null; columns: Column[] };
 type DerivedTable = { id: string; name: string; sqlName: string; querySql: string; refreshCron: string | null; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; targetTable: { id: string; rowCount: string; lastDataAt: string | null } | null };
-type Dataset = { id: string; slug: string; name: string; description: string | null; active: boolean; schemaName: string; tables: Table[]; derivedTables: DerivedTable[] };
+type Dataset = { id: string; slug: string; name: string; description: string | null; active: boolean; schemaName: string; storageServerId: string | null; storageServer: { id: string; name: string } | null; tables: Table[]; derivedTables: DerivedTable[] };
 type Project = { id: string; slug: string; name: string; description: string | null; active: boolean; datasets: Dataset[] };
+type StorageServerOption = { id: string; name: string; isDefault: boolean };
 
 type Tab =
   | { id: string; kind: "dataset"; datasetId: string; label: string }
@@ -186,7 +187,104 @@ function DeleteTableButton({ tableId, tableName, onDeleted }: { tableId: string;
   );
 }
 
-export function ProjectWorkspace({ project, publicOrigin }: { project: Project; publicOrigin: string }) {
+function ProjectMigrateStorageDialog({ project, storageServers, onChanged }: {
+  project: Project; storageServers: StorageServerOption[]; onChanged: () => void;
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+
+  // Servidor atual do projeto: storageServerId do primeiro dataset, ou o isDefault
+  const currentServerId = project.datasets[0]?.storageServerId
+    ?? storageServers.find(s => s.isDefault)?.id
+    ?? null;
+  const currentServer = storageServers.find(s => s.id === currentServerId);
+
+  // Servidores disponíveis como destino (exclui o atual)
+  const targetOptions = storageServers.filter(s => s.id !== currentServerId);
+
+  const [targetId, setTargetId] = useState(targetOptions[0]?.id ?? "");
+  const [migrating, setMigrating] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  if (storageServers.length < 2) return null;
+
+  function open() {
+    setTargetId(targetOptions[0]?.id ?? "");
+    setResult(null); setError(null);
+    dialogRef.current?.showModal();
+  }
+  function close() { dialogRef.current?.close(); }
+
+  async function migrate() {
+    setMigrating(true); setResult(null); setError(null);
+    try {
+      const r = await fetch(`/api/v1/projects/${project.id}/migrate-storage`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ targetStorageServerId: targetId }),
+      });
+      const j = await r.json() as { data?: { datasetsMigrated: number }; error?: { message: string } };
+      if (!r.ok) { setError(j.error?.message ?? "Erro na migração"); setMigrating(false); return; }
+      setResult(`✓ ${j.data?.datasetsMigrated ?? 0} dataset(s) migrado(s) com sucesso`);
+      setMigrating(false);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Erro de rede");
+      setMigrating(false);
+    }
+  }
+
+  const target = storageServers.find(s => s.id === targetId);
+
+  return (
+    <>
+      <button className="btn btn-ghost btn-xs gap-1" onClick={open} title="Migrar projeto para outro servidor SQL">
+        <Server size={13} />
+      </button>
+      <dialog ref={dialogRef} className="modal">
+        <div className="modal-box max-w-md">
+          <h3 className="font-bold text-base">Migrar projeto</h3>
+          <p className="mt-0.5 text-xs text-base-content/50">Move todos os datasets de <strong>{project.name}</strong> para outro servidor de armazenamento.</p>
+
+          <div className="mt-4 space-y-3">
+            <div className="text-xs text-base-content/50">
+              Servidor atual: <span className="font-medium text-base-content/70">{currentServer?.name ?? "Servidor padrão"}</span>
+            </div>
+            <label className="form-control w-full">
+              <span className="label-text font-medium">Servidor de destino</span>
+              <select className="select mt-1 w-full" value={targetId} onChange={e => setTargetId(e.target.value)}>
+                {targetOptions.map(s => (
+                  <option key={s.id} value={s.id}>{s.name}{s.isDefault ? " (padrão)" : ""}</option>
+                ))}
+              </select>
+            </label>
+
+            <div className="rounded-lg border border-warning/30 bg-warning/5 p-3 text-xs text-base-content/70">
+              <p className="font-medium text-warning">Atenção</p>
+              <ul className="mt-1 list-disc list-inside space-y-0.5">
+                <li>Todas as tabelas serão copiadas para <strong>{target?.name}</strong></li>
+                <li>Os dados originais <em>não</em> serão removidos do servidor atual</li>
+                <li>Pode demorar para projetos com muitos dados</li>
+              </ul>
+            </div>
+
+            {result && <div className="alert alert-success text-sm">{result}</div>}
+            {error && <div className="alert alert-error text-sm">{error}</div>}
+          </div>
+
+          <div className="modal-action">
+            <button className="btn btn-ghost btn-sm" onClick={close} disabled={migrating}>Cancelar</button>
+            <button className="btn btn-warning btn-sm" onClick={() => { void migrate(); }} disabled={migrating}>
+              {migrating ? <><span className="loading loading-spinner loading-xs" />Migrando…</> : "Migrar projeto"}
+            </button>
+          </div>
+        </div>
+        <form method="dialog" className="modal-backdrop"><button onClick={close}>fechar</button></form>
+      </dialog>
+    </>
+  );
+}
+
+export function ProjectWorkspace({ project, publicOrigin, storageServers }: { project: Project; publicOrigin: string; storageServers: StorageServerOption[] }) {
   const router = useRouter();
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -334,6 +432,7 @@ export function ProjectWorkspace({ project, publicOrigin }: { project: Project; 
             <span className="truncate text-xs font-semibold">{project.name}</span>
             <div className="flex shrink-0 items-center gap-1">
               <CreateCatalogDialog kind="dataset" projectId={project.id} />
+              <ProjectMigrateStorageDialog project={project} storageServers={storageServers} onChanged={() => router.refresh()} />
               <EditCatalogDialog kind="project" id={project.id} name={project.name} description={project.description} active={project.active} />
             </div>
           </div>
@@ -390,6 +489,7 @@ export function ProjectWorkspace({ project, publicOrigin }: { project: Project; 
                   dataset={activeDataset}
                   projectSlug={project.slug}
                   publicOrigin={publicOrigin}
+                  storageServers={storageServers}
                   onSelectTable={(tableId) => {
                     const table = activeDataset.tables.find(t => t.id === tableId);
                     if (table) openTable(activeDataset, table);

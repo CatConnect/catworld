@@ -1,7 +1,8 @@
 "use client";
 import { useRef, useState } from "react";
 import { Cron } from "croner";
-import { Cable, ChevronDown, Code2, Database, DatabaseZap, Pencil, Plus, RefreshCw, Search, Table2, ToggleLeft, ToggleRight, Trash2, UploadCloud } from "lucide-react";
+import { Cable, ChevronDown, Code2, Database, DatabaseZap, Pencil, Plus, RefreshCw, Search, Server, Table2, ToggleLeft, ToggleRight, Trash2, UploadCloud } from "lucide-react";
+// Note: Pencil still used in GroupEditDialog and SourceEditDialog
 import { CopyableId } from "@/components/ui/copyable-id";
 import { EditCatalogDialog } from "@/components/management/edit-catalog-dialog";
 import { StatusBadge } from "@/components/ui/primitives";
@@ -22,7 +23,8 @@ type Source = {
 };
 type Table = { id: string; name: string; lastDataAt: string | null; source: Source | null };
 type DerivedTable = { id: string; name: string; sqlName: string; querySql: string; refreshCron: string | null; active: boolean; lastStatus: string | null; lastRowCount: string | null; lastError: string | null; lastRefreshedAt: string | null; nextRefreshAt: string | null; targetTable: { id: string; rowCount: string; lastDataAt: string | null } | null };
-type Dataset = { id: string; slug: string; name: string; description: string | null; active: boolean; schemaName: string; tables: Table[]; derivedTables: DerivedTable[] };
+type StorageServerOption = { id: string; name: string; isDefault: boolean };
+type Dataset = { id: string; slug: string; name: string; description: string | null; active: boolean; schemaName: string; storageServerId: string | null; storageServer: { id: string; name: string } | null; tables: Table[]; derivedTables: DerivedTable[] };
 
 // A group is either:
 //   - Multiple table sources that share a sourceGroupId (batch import)
@@ -764,9 +766,22 @@ function DerivedRow({ dt, schemaName, onSelectTable, onChanged }: {
   );
 }
 
+// ── Storage Server badge (read-only) ──────────────────────────────────────
+function StorageServerBadge({ dataset, storageServers }: { dataset: Dataset; storageServers: StorageServerOption[] }) {
+  const current = dataset.storageServerId
+    ? storageServers.find(s => s.id === dataset.storageServerId)
+    : storageServers.find(s => s.isDefault);
+  return (
+    <span className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-base-content/45" title="Servidor de armazenamento">
+      <Server size={10} className="shrink-0" />
+      {current?.name ?? "Servidor padrão"}
+    </span>
+  );
+}
+
 // ── Main panel ─────────────────────────────────────────────────────────────
-export function DatasetPanel({ dataset, projectSlug, publicOrigin, onSelectTable, onChanged }: {
-  dataset: Dataset; projectSlug: string; publicOrigin: string;
+export function DatasetPanel({ dataset, projectSlug, publicOrigin, storageServers, onSelectTable, onChanged }: {
+  dataset: Dataset; projectSlug: string; publicOrigin: string; storageServers: StorageServerOption[];
   onSelectTable: (tableId: string) => void; onChanged: () => void;
 }) {
   const derivedTargetIds = new Set(dataset.derivedTables.map(dt => dt.targetTable?.id).filter(Boolean));
@@ -789,7 +804,12 @@ export function DatasetPanel({ dataset, projectSlug, publicOrigin, onSelectTable
           <div className="min-w-0">
             <h2 className="truncate font-semibold">{dataset.name}</h2>
             {dataset.description && <p className="mt-0.5 truncate text-xs text-base-content/45">{dataset.description}</p>}
-            <div className="mt-2"><CopyableId value={dataset.id} label="Dataset ID" /></div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-1">
+              <CopyableId value={dataset.id} label="Dataset ID" />
+              {storageServers.length > 0 && (
+                <StorageServerBadge dataset={dataset} storageServers={storageServers} />
+              )}
+            </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
             <PowerBIDialog projectSlug={projectSlug} datasetSlug={dataset.slug} datasetName={dataset.name} publicOrigin={publicOrigin} />
